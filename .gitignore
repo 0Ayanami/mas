@@ -1,0 +1,5 @@
+/.env.example
+/camel_logs
+/data
+/docs
+/theory_base

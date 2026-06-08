@@ -1,0 +1,25 @@
+[project]
+name = "consensus-memory-mas"
+version = "0.1.0"
+description = "A multi-agent research framework for Byzantine-resilient memory synchronization."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+]
+
+[project.optional-dependencies]
+camel = [
+    "camel-ai>=0.2.70",
+    "python-dotenv>=1.0",
+    "rich>=13.7",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
