@@ -43,44 +43,15 @@ class ToolRegistry:
         return "\n".join(f"- {spec.name}: {spec.description}" for spec in self._tools.values())
 
 
-def read_text_file(path: str, max_chars: int = 12000) -> str:
-    file_path = Path(path)
-    if not file_path.exists():
-        raise FileNotFoundError(path)
-    return file_path.read_text(encoding="utf-8")[:max_chars]
-
-
-def keyword_extract(text: str, keywords: str) -> str:
-    wanted = [item.strip().lower() for item in keywords.split(",") if item.strip()]
-    lines = []
-    for line in text.splitlines():
-        lowered = line.lower()
-        if any(keyword in lowered for keyword in wanted):
-            lines.append(line)
-    return "\n".join(lines[:80]) or "No matching lines found."
-
 
 def build_default_tool_registry(memory_search: Callable[[str, int], str] | None = None) -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register(
-        ToolSpec(
-            name="read_text_file",
-            description="Read a UTF-8 text or markdown file from disk.",
-            func=read_text_file,
-        )
-    )
-    registry.register(
-        ToolSpec(
-            name="keyword_extract",
-            description="Extract lines containing comma-separated keywords from a text block.",
-            func=keyword_extract,
-        )
-    )
+
     if memory_search is not None:
         registry.register(
             ToolSpec(
                 name="search_memory",
-                description="Search accepted and rejected shared memory proposals.",
+                description="Search accepted shared memory proposals.",
                 func=memory_search,
             )
         )

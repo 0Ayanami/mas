@@ -17,27 +17,39 @@ class Mem0MemoryBackend:
 
             self.client = MemoryClient(api_key=api_key)
 
-    def add_proposal(self, proposal: MemoryProposal) -> Any:
+    def add_proposal(self, proposal: MemoryProposal, user_id: str) -> Any:
         content = proposal.model_dump_json(indent=2)
         metadata = {
-            "proposal_id": proposal.proposal_id,
-            "task_id": proposal.task_id,
-            "agent_id": proposal.agent_id,
-            "status": proposal.status.value,
-            "content_hash": proposal.content_hash,
-            "memory_type": proposal.memory_type,
+            "proposal_id": proposal.header.proposal_id,
+            "task_id": proposal.header.task_id,
+            "agent_id": proposal.header.proposing_agent_id,
+            "agent_signature": proposal.header.proposing_agent_signature,
         }
         return self.client.add(
             [{"role": "assistant", "content": content}],
-            agent_id=proposal.agent_id,
-            run_id=proposal.task_id,
+            user_id=user_id,
             metadata=metadata,
-            infer=False,
         )
 
-    def search(self, query: str, *, task_id: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
-        filters: dict[str, Any] = {"task_id": task_id} if task_id else {"agent_id": "*"}
+    def search(self, query: str, user_id: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        filters: dict[str, Any] = {"user_id": user_id} if user_id else {}
         response = self.client.search(query, filters=filters, top_k=limit)
+        if not response:
+            return "No memory records matched the query."
         if isinstance(response, dict):
             return list(response.get("results", []))
-        return list(response or [])
+        return list(response)
+
+    def update_proposal(self, memory_id: str, proposal: MemoryProposal, user_id: str) -> Any:
+        text = proposal.model_dump_json(indent=2)
+        metadata = {
+            "proposal_id": proposal.header.proposal_id,
+            "task_id": proposal.header.task_id,
+            "agent_id": proposal.header.proposing_agent_id,
+            "agent_signature": proposal.header.proposing_agent_signature,
+        }
+        try:
+            return self.client.update(memory_id, text=text, metadata=metadata)
+        except Exception:
+            return self.add_proposal(text, user_id=user_id, metadata=metadata)
+

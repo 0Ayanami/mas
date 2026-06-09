@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 from camel.types import ModelPlatformType, ModelType
-
+from mas_framework.memory import Mem0MemoryBackend
 
 class ProposalStatus(str, Enum):
     PENDING = "pending"
@@ -24,6 +24,7 @@ class AgentConfig:
     model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
     role: str = ""
     system_prompt: str = ""
+    memory: Mem0MemoryBackend | None = None
 
 @dataclass
 class ToolCall:
@@ -76,7 +77,6 @@ class VerificationVector:
             "value": 0.25,
             "security": 0.20,
         },
-        verifier_weight: float = 1.0,
     ) -> VerificationVector:
         votes = {
             "veracity": int(veracity),
@@ -90,7 +90,6 @@ class VerificationVector:
             confidence=round(confidence, 4),
             rationale=rationale,
             verifier_id=verifier_id,
-            weight=verifier_weight,
         )
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
@@ -233,8 +232,8 @@ class MemoryProposal:
     header: ProposalHeader
     body: ProposalBody
     verification: ProposalVerification
-    status: ProposalStatus
-    consensus_round: int
+    status: ProposalStatus = ProposalStatus.PENDING
+    consensus_round: int = 0
     verifications: list[VerificationVector]
 
     def __init__(

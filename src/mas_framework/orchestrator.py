@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-
+import math
 from mas_framework.agents import AgentProtocol, create_agent
 from mas_framework.consensus import SmartQuorumPolicy
-from mas_framework.memory import SQLiteMemoryStore
+from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, ConsensusDecision, MemoryProposal, ProposalStatus
 from mas_framework.tools import ToolRegistry, build_default_tool_registry
-
+ 
 
 DEFAULT_AGENTS = [
     AgentConfig(
@@ -42,145 +42,106 @@ DEFAULT_AGENTS = [
 ]
 
 
-class ResearchOrchestrator:
+class Orchestrator:
     def __init__(
         self,
         *,
-        memory: SQLiteMemoryStore | None = None,
         tools: ToolRegistry | None = None,
         agent_configs: list[AgentConfig] | None = None,
         policy: SmartQuorumPolicy | None = None,
     ):
-        self.memory = memory or SQLiteMemoryStore()
-        self.tools = tools or build_default_tool_registry(memory_search=self._search_memory_tool)
+        self.tools = tools or build_default_tool_registry(memory_search=self.memory.search)
         self.agent_configs = agent_configs or DEFAULT_AGENTS
         self.agents: dict[str, AgentProtocol] = {
             config.agent_id: create_agent(config, self.tools) for config in self.agent_configs
         }
         self.policy = policy or SmartQuorumPolicy()
-        # agent_stats holds running tallies used to compute voting weights
-        # fields: proposals_submitted, proposals_passed, confidence_sum, confidence_count
+
+        """ agent state维护的是每个agent提出的memory proposal的统计数据，用于后续计算agent权重
+            proposal_sum: agent提出的proposal总数
+            proposal_submitted: proposal成功递交总数
+            base: 放大系数,由agent的LLM能力决定
+            accuracy: proposal成功递交的比例
+            verification_quality: 多维度验证综合得分
+        """
         self.agent_stats: dict[str, dict[str, float]] = {
             config.agent_id: {
-                "proposals_submitted": 0,
-                "proposals_passed": 0,
-                "confidence_sum": 0.0,
-                "confidence_count": 0,
+                "proposal_sum": 0,
+                "proposal_submitted": 0,
+                "base": 1.0,
+                "verified_conf": 0.0,
+                "verified_conf_sum": 0.0,
+                "historical_conf": 0.0,
+                "weight": 1.0,
             }
             for config in self.agent_configs
         }
 
-    def _compute_agent_weight(self, agent_id: str, *, alpha: float = 0.5, beta: float = 0.5, lambda_coeff: float = 1.0) -> float:
+    def _compute_agent_weight(self, agent_id: str, *, alpha: float = 0.5, beta: float = 0.5) -> float:
+        """
+        根据agent的历史表现计算其权重
+        """
         stats = self.agent_stats.get(agent_id, None)
-        # default neutral values if no history
         if not stats:
-            vc = 0.5
-            avg_conf = 0.5
+            vc = 1.0
+            hc = 1.0
+            base = 1.0
         else:
-            submitted = stats.get("proposals_submitted", 0)
-            passed = stats.get("proposals_passed", 0)
-            vc = (passed / submitted) if submitted > 0 else 0.5
-            conf_count = stats.get("confidence_count", 0)
-            avg_conf = (stats.get("confidence_sum", 0.0) / conf_count) if conf_count > 0 else 0.5
-        q = alpha * vc + beta * avg_conf
-        import math
-
-        return float(math.exp(lambda_coeff * q))
-
-    def _search_memory_tool(self, query: str, limit: int = 5) -> str:
-        proposals = self.memory.search(query=query, limit=limit)
-        if not proposals:
-            return "No memory records matched the query."
-        return "\n".join(
-            f"- {proposal.status.value}: {proposal.short_label()} :: {proposal.results_observation}"
-            for proposal in proposals
-        )
-
-    def run_document_research(
-        self,
-        *,
-        document_path: str,
-        task_id: str = "consensus-memory-research",
-    ) -> tuple[MemoryProposal, ConsensusDecision]:
-        document = self.tools.call("read_text_file", path=document_path, max_chars=18000)
-        focused_lines = self.tools.call(
-            "keyword_extract",
-            text=document,
-            keywords="Consensus, Memory Proposal, Verification, Quorum, Evaluation, 共识, 记忆",
-        )
-
-        researcher = self.agents["researcher_1"]
-        research_prompt = f"""
-Read the research notes and produce a compact first-step implementation proposal for a multi-agent system with tool calling and memory.
-
-Document path: {Path(document_path).as_posix()}
-
-Focused notes:
-{focused_lines}
-"""
-        analysis = researcher.run(research_prompt)
-        proposal = MemoryProposal(
-            agent_id=researcher.config.agent_id,
-            task_id=task_id,
-            memory_type="research_note",
-            title="Initial CAMEL-based MAS scaffold",
-            thoughts_decision=(
-                "The first implementation step should create minimal but explicit abstractions "
-                "for agents, tools, shared memory, proposal schemas, verification, and quorum decisions."
-            ),
-            action="Read research markdown, extracted consensus/memory requirements, and drafted scaffold.",
-        data={
-                "document_path": str(document_path),
-                "focused_lines": focused_lines,
-                "agent_analysis": analysis,
-                "tool_calls": [tool_call.model_dump() for tool_call in self.tools.history],
-            },
-            results_observation=(
-                "A basic research workflow can produce structured MemoryProposal records, "
-                "ask multiple verifier agents to evaluate them, and persist accepted/rejected "
-                "records for later consensus-protocol experiments."
-            ),
-            self_confidence=0.82,
-        )
-        decision = self.verify_and_commit(proposal)
-        return proposal, decision
+            vc = stats.get("verified_conf", 1.0)
+            hc = stats.get("historical_conf", 1.0)
+            base = stats.get("base", 1.0)
+        q = alpha * vc + beta * hc
+        return float(math.exp(base * q))
 
     def verify_and_commit(self, proposal: MemoryProposal) -> ConsensusDecision:
+        proposer = proposal.header.proposing_agent_id
+
         validators = [
             agent
             for agent_id, agent in self.agents.items()
-            if agent_id != proposal.agent_id
+            if agent_id != proposer
         ]
-        # collect verification vectors and attach per-verifier weights based on history
+        
         verifications = []
         for agent in validators:
             v = agent.verify(proposal)
-            # compute weight for this verifier (based on its stats)
-            weight = self._compute_agent_weight(agent.config.agent_id)
-            # set weight on the verification vector
+            weight = self.agent_stats.get(agent.config.agent_id, {}).get("weight", 1.0)
             try:
                 setattr(v, "weight", weight)
             except Exception:
                 pass
             verifications.append(v)
         proposal.verifications = verifications
+
+        # 进行共识决策
+        proposal.consensus_round += 1
         decision = self.policy.decide(proposal, validator_count=len(validators))
         proposal.status = decision.status
-        self.memory.save_proposal(proposal)
-        # update proposing agent stats
-        proposer = proposal.agent_id
+        if proposal.status == ProposalStatus.ACCEPTED:
+            for agent_id, agent in self.agents.items():
+                try:
+                    agent.memory.add_proposal(proposal, user_id=agent_id)
+                except Exception as exc:
+                    print(f"Failed to update memory for proposal {proposal.ProposalHeader.proposal_id}: {exc}")
+        
+        # 更新agent state
         stats = self.agent_stats.setdefault(proposer, {
-            "proposals_submitted": 0,
-            "proposals_passed": 0,
-            "confidence_sum": 0.0,
-            "confidence_count": 0,
-        })
-        stats["proposals_submitted"] = stats.get("proposals_submitted", 0) + 1
+                "proposal_sum": 0,
+                "proposal_submitted": 0,
+                "base": 1.0,
+                "verified_conf": 0.0,
+                "verified_conf_sum": 0.0,
+                "historical_conf": 0.0,
+                "weight": 1.0,
+            })
+        stats["proposal_sum"] = stats.get("proposal_sum", 0) + 1
         if decision.status == ProposalStatus.ACCEPTED:
-            stats["proposals_passed"] = stats.get("proposals_passed", 0) + 1
-        # record the proposal's overall multi-agent confidence (if available)
+            stats["proposal_submitted"] = stats.get("proposal_submitted", 0) + 1
+            stats["historical_conf"] = round(stats["proposal_submitted"] / stats["proposal_sum"], 4) if stats["proposal_sum"] > 0 else 0.0
+
         mac = proposal.verification.multi_agent_verification
         if mac and mac.confidence is not None:
-            stats["confidence_sum"] = stats.get("confidence_sum", 0.0) + float(mac.confidence)
-            stats["confidence_count"] = stats.get("confidence_count", 0) + 1
+            stats["verified_conf_sum"] = stats.get("verified_conf_sum", 0.0) + mac.confidence
+            stats["verified_conf"] = round(stats["verified_conf_sum"] / stats["proposal_sum"], 4) if stats["proposal_sum"] > 0 else 0.0
+        stats["weight"] = self._compute_agent_weight(proposer)
         return decision
