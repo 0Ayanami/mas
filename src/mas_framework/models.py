@@ -8,23 +8,17 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 from camel.types import ModelPlatformType, ModelType
-from mas_framework.memory import Mem0MemoryBackend
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mas_framework.memory import Mem0MemoryBackend
+    from mas_framework.tools import ToolRegistry
 
 class ProposalStatus(str, Enum):
     PENDING = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
-
-
-@dataclass
-class AgentConfig:
-    agent_id: str
-    model_platform: ModelPlatformType = ModelPlatformType.DEFAULT
-    model_type: ModelType = ModelType.DEFAULT
-    model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
-    role: str = ""
-    system_prompt: str = ""
-    memory: Mem0MemoryBackend | None = None
 
 @dataclass
 class ToolCall:
@@ -35,6 +29,16 @@ class ToolCall:
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         return asdict(self)
 
+@dataclass
+class AgentConfig:
+    agent_id: str
+    model_platform: ModelPlatformType = ModelPlatformType.DEFAULT
+    model_type: ModelType = ModelType.DEFAULT
+    model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
+    role: str = ""
+    system_prompt: str = ""
+    memory: "Mem0MemoryBackend | None" = None
+    tools: "ToolRegistry | None" = None
 
 @dataclass
 class VerificationVector:
@@ -94,7 +98,6 @@ class VerificationVector:
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         return asdict(self)
-
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)

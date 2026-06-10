@@ -5,11 +5,9 @@ import json
 import re
 from typing import Protocol
 
-from camel.models import ModelFactory
-from camel.types import ModelPlatformType, ModelType
-
+from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, MemoryProposal, VerificationVector
-from mas_framework.tools import ToolRegistry
+from mas_framework.tools import build_default_tool_registry
 
 
 class AgentProtocol(Protocol):
@@ -28,9 +26,10 @@ class AgentProtocol(Protocol):
         ...
 
 class Agent:
-    def __init__(self, config: AgentConfig, tools: ToolRegistry):
+    def __init__(self, config: AgentConfig):
         self.config = config
-        self.tools = tools
+        self.memory = config.memory or Mem0MemoryBackend()
+        self.tools = config.tools or build_default_tool_registry(memory_search=config.memory.search if config.memory else None)
         self._agent = self._build_agent()
 
     def _build_agent(self):
@@ -110,10 +109,10 @@ Proposal:
         )
 
 
-def create_agent(config: AgentConfig, tools: ToolRegistry) -> AgentProtocol:
+def create_agent(config: AgentConfig) -> AgentProtocol:
     if bool(os.getenv("OPENAI_API_KEY")):
         try:
-            return Agent(config, tools)
+            return Agent(config)
         except Exception as exc:
             print(f"Agent init failed for {config.agent_id}; Error: {exc}")
     return None

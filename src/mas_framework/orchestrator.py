@@ -15,7 +15,14 @@ DEFAULT_AGENTS = [
         role="Researcher",
         system_prompt=(
             "You collect and summarize evidence for consensus-based multi-agent memory research. "
-            "Prefer concrete claims, assumptions, and open questions."
+            "Prefer concrete claims, assumptions, and open questions.\n"
+            "\n"
+            "Memory Proposal Workflow:\n"
+            "After each ReAct step, decide if a Memory Proposal is needed (research_note / "
+
+            "evidence / milestone / tool_observation). If so, call `prepare_proposal_for_submission` "
+            "to build the proposal locally (header + body + self-verification), then the "
+            "orchestrator handles multi-agent consensus via `verify_and_commit`."
         ),
     ),
     AgentConfig(
@@ -41,19 +48,16 @@ DEFAULT_AGENTS = [
     ),
 ]
 
-
 class Orchestrator:
     def __init__(
         self,
         *,
-        tools: ToolRegistry | None = None,
         agent_configs: list[AgentConfig] | None = None,
         policy: SmartQuorumPolicy | None = None,
     ):
-        self.tools = tools or build_default_tool_registry(memory_search=self.memory.search)
         self.agent_configs = agent_configs or DEFAULT_AGENTS
         self.agents: dict[str, AgentProtocol] = {
-            config.agent_id: create_agent(config, self.tools) for config in self.agent_configs
+            config.agent_id: create_agent(config) for config in self.agent_configs
         }
         self.policy = policy or SmartQuorumPolicy()
 
@@ -76,6 +80,7 @@ class Orchestrator:
             }
             for config in self.agent_configs
         }
+        # 非持久化保存，也就是说Orchestrator重启后agent的历史表现会归零（这一部分可能需要改进）
 
     def _compute_agent_weight(self, agent_id: str, *, alpha: float = 0.5, beta: float = 0.5) -> float:
         """

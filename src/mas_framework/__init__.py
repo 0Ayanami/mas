@@ -7,7 +7,7 @@ from mas_framework.models import (
     ProposalStatus,
     VerificationVector,
 )
-from mas_framework.orchestrator import ResearchOrchestrator
+from mas_framework.orchestrator import Orchestrator as ResearchOrchestrator
 
 __all__ = [
     "AgentConfig",
