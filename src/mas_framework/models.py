@@ -66,7 +66,7 @@ class VerificationVector:
     verifier_id: str
     conf_threshold: float
     vote_result: bool = False
-    weight: float
+    weight: float = 1.0
 
     """
     Veracity：主要面向Data和Observation字段，针对给出的事实性信息进行真实性、准确性判断。全部条件通过记为1，否则0。

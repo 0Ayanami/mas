@@ -5,10 +5,11 @@ import json
 import re
 from typing import Protocol
 import math
-from mas_framework.memory import Mem0MemoryBackend
-from mas_framework.models import AgentConfig, MemoryProposal, VerificationVector,AgentState, SelfVerification, ProposalStatus, MultiAgentVerificationSummary
-from mas_framework.tools import build_default_tool_registry, create_proposal_creation_toolkit, ToolRegistry
-
+from memory import Mem0MemoryBackend
+from models import AgentConfig, MemoryProposal, VerificationVector,AgentState, SelfVerification, ProposalStatus, MultiAgentVerificationSummary
+from tools import build_default_tool_registry, create_proposal_creation_toolkit, ToolRegistry
+from utils.loader import load_verify_prompts
+from jinja2 import Template
 
 class AgentProtocol(Protocol):
     config: AgentConfig
@@ -78,20 +79,9 @@ class Agent:
         return float(math.exp(base * q))
     
     def verify(self, proposal: MemoryProposal) -> VerificationVector:
-        prompt = f"""
-Evaluate this memory proposal for Byzantine-resilient MAS research.-
-Return a JSON object ONLY (no extra text) with these keys:
-{{
-  "veracity": true or false,
-  "rationality": true or false,
-  "value": true or false,
-  "security": true or false,
-  "rationale": "string explaining the judgement"
-}}
-
-Proposal:
-{proposal.model_dump_json(indent=2)}
-"""
+        template = Template(load_verify_prompts())
+        prompt = template.render(proposal=proposal.model_dump_json(indent=2))
+        
         response = self.run(prompt)
 
         match = re.search(r"\{.*\}", response, re.DOTALL)
