@@ -5,12 +5,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mas_framework.models import MemoryProposal, ProposalStatus
-
-
+from mas_framework.models import MemoryProposal
+    
 class Mem0MemoryBackend:
-    def __init__(self, *, api_key: str | None = None, client: Any | None = None):
+    def __init__(self, *, api_key: str | None = None, client: Any | None = None, topk:int = 5):
         self.client = client
+        self.topk = topk
         if self.client is None:
             os.environ.setdefault("MEM0_DIR", str(Path("data/mem0").resolve()))
             from mem0 import MemoryClient
@@ -31,9 +31,9 @@ class Mem0MemoryBackend:
             metadata=metadata,
         )
 
-    def search(self, query: str, user_id: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    def search(self, query: str, user_id: str | None = None) -> list[dict[str, Any]]:
         filters: dict[str, Any] = {"user_id": user_id} if user_id else {}
-        response = self.client.search(query, filters=filters, top_k=limit)
+        response = self.client.search(query, filters=filters, top_k=self.topk)
         if not response:
             return "No memory records matched the query."
         if isinstance(response, dict):
@@ -51,5 +51,5 @@ class Mem0MemoryBackend:
         try:
             return self.client.update(memory_id, text=text, metadata=metadata)
         except Exception:
-            return self.add_proposal(text, user_id=user_id, metadata=metadata)
+            return self.add_proposal(proposal, user_id=user_id)
 

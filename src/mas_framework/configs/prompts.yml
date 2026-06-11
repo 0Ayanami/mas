@@ -1,0 +1,2 @@
+system_prompt_path: prompts/system_prompt.md
+verify_prompt_path: prompts/verify_prompt.md

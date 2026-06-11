@@ -9,16 +9,22 @@ from enum import Enum
 from typing import Any, Literal
 from camel.types import ModelPlatformType, ModelType
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from mas_framework.memory import Mem0MemoryBackend
-    from mas_framework.tools import ToolRegistry
-
 class ProposalStatus(str, Enum):
     PENDING = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+
+@dataclass
+class AgentConfig:
+    agent_id: str
+    model_platform: ModelPlatformType = ModelPlatformType.DEFAULT
+    model_type: ModelType = ModelType.DEFAULT
+    model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
+
+    role: str = ""
+    system_prompt: str = ""
+
+    conf_threshold: float = 0.7
 
 @dataclass
 class ToolCall:
@@ -30,15 +36,24 @@ class ToolCall:
         return asdict(self)
 
 @dataclass
-class AgentConfig:
-    agent_id: str
-    model_platform: ModelPlatformType = ModelPlatformType.DEFAULT
-    model_type: ModelType = ModelType.DEFAULT
-    model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
-    role: str = ""
-    system_prompt: str = ""
-    memory: "Mem0MemoryBackend | None" = None
-    tools: "ToolRegistry | None" = None
+class AgentState:
+    proposal_sum:int = 0
+    proposal_submitted:int = 0
+    base: float = 1.0
+    verified_conf: float = 0.0
+    verified_conf_sum: float = 0.0
+    historical_conf: float = 0.0
+    weight: float = 1.0
+    
+    """ agent state维护的是每个agent提出的memory proposal的统计数据，用于后续计算agent权重
+        proposal_sum: agent提出的proposal总数
+        proposal_submitted: proposal成功递交总数
+        base: 放大系数,由agent的LLM能力决定
+        accuracy: proposal成功递交的比例
+        verification_quality: 多维度验证综合得分
+    """
+    def model_dump(self, mode: str = "python") -> dict[str, Any]:
+        return asdict(self)
 
 @dataclass
 class VerificationVector:
@@ -49,7 +64,9 @@ class VerificationVector:
     confidence: float
     rationale: str
     verifier_id: str
-    weight: float = 1.0
+    conf_threshold: float
+    vote_result: bool = False
+    weight: float
 
     """
     Veracity：主要面向Data和Observation字段，针对给出的事实性信息进行真实性、准确性判断。全部条件通过记为1，否则0。
@@ -75,6 +92,8 @@ class VerificationVector:
         security: bool | None = None,
         rationale: str,
         verifier_id: str,
+        conf_threshold: float = 0.7,
+        weight: float = 1.0,
         weights: dict[str, float] = {
             "veracity": 0.30,
             "rationality": 0.25,
@@ -89,11 +108,15 @@ class VerificationVector:
             "security": int(security),
         }
         confidence = sum(votes[key] * weights[key] for key in votes)
+        vote_result = confidence >= conf_threshold
         return cls(
             **votes,
             confidence=round(confidence, 4),
             rationale=rationale,
             verifier_id=verifier_id,
+            vote_result=vote_result,
+            conf_threshold=conf_threshold,
+            weight=weight,
         )
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
@@ -115,20 +138,24 @@ def _as_list(value: Any) -> list[Any]:
 class ProposalHeader:
     proposal_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     task_id: str = ""
+    # 这两个参数需要从orchestrator中获取（涉及全局信息）
+    
     timestamp: datetime = field(default_factory=_utc_now)
     proposing_agent_id: str = ""
-    proposing_agent_signature: str = ""
+    # 直接获取
+
     parent_proposal_ids: list[str] = field(default_factory=list)
     body_hash: str = ""
+    # 这两个参数未知
+    
     proposal_summary: str = ""
     memory_type: Literal["research_note", "evidence", "milestone", "tool_observation"] = "research_note"
-
+    # 这两个参数需要通过prompt让LLM回答
+    
     def __post_init__(self) -> None:
         if isinstance(self.timestamp, str):
             self.timestamp = datetime.fromisoformat(self.timestamp)
         self.parent_proposal_ids = list(self.parent_proposal_ids or [])
-        if not self.proposing_agent_signature and self.proposing_agent_id:
-            self.proposing_agent_signature = self.proposing_agent_id
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         payload = asdict(self)

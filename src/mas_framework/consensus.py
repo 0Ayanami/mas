@@ -12,11 +12,9 @@ from mas_framework.models import (
 
 
 class SmartQuorumPolicy:
-    def __init__(self, confidence_threshold: float = 0.7, base_threshold: float = 2 / 3, min_threshold: float = 0.55, agent_count:int=3):
+    def __init__(self, base_threshold: float = 2 / 3, min_threshold: float = 0.55):
         self.base_threshold = base_threshold
         self.min_threshold = min_threshold
-        self.confidence_threshold = confidence_threshold
-        self.agent_count = agent_count
 
     def threshold_for(self, proposal: MemoryProposal, validator_count: int) -> float:
         """
@@ -24,7 +22,8 @@ class SmartQuorumPolicy:
         """
         pass
 
-    def decide(self, proposal: MemoryProposal, validator_count: int) -> ConsensusDecision:
+    def decide(self, proposal: MemoryProposal, agent_count: int) -> ConsensusDecision:
+        validator_count = len(proposal.verifications)
         if not proposal.verifications or validator_count <= 3:
             return ConsensusDecision(
                 proposal_id=proposal.proposal_id,
@@ -36,23 +35,22 @@ class SmartQuorumPolicy:
                 rationale="No verification votes were collected.",
             )
         
-        # 得到每个agent权重列表，并计算总权重
-        weights = [getattr(vote, "weight", 1.0) for vote in proposal.verifications]
-        total_weight = sum(weights) if weights else float(validator_count)
-
+        # 计算总权重
+        total_weight = sum(getattr(vote, "weight", 1.0) for vote in proposal.verifications)
+        # 计算赞成权重
         positive_weight = sum(
             getattr(vote, "weight", 1.0)
             for vote in proposal.verifications
-            if vote.confidence >= self.confidence_threshold
+            if vote.vote_result
         )
         # 赞成权重占比
-        vote_ratio = positive_weight / total_weight if total_weight > 0 else 0.0
+        vote_ratio = round(positive_weight / total_weight, 4) if total_weight > 0 else 0.0
 
         # 计算权重平均值
         def _weighted_mean(attr: str) -> float:
             if total_weight <= 0:
                 return mean(getattr(vote, attr) for vote in proposal.verifications)
-            return sum(getattr(vote, attr) * getattr(vote, "weight", 1.0) for vote in proposal.verifications) / total_weight
+            return round(sum(getattr(vote, attr) * getattr(vote, "weight", 1.0) for vote in proposal.verifications) / total_weight, 4)
         
         # 得到阈值
         threshold = self.threshold_for(proposal, validator_count)
@@ -61,17 +59,17 @@ class SmartQuorumPolicy:
         avg_confidence = round(_weighted_mean("confidence"), 4)
 
         proposal.verification.multi_agent_verification = MultiAgentVerificationSummary(
-            veracity=round(_weighted_mean("veracity"), 4),
-            rationality=round(_weighted_mean("rationality"), 4),
-            value=round(_weighted_mean("value"), 4),
-            security=round(_weighted_mean("security"), 4),
+            veracity=_weighted_mean("veracity"),
+            rationality=_weighted_mean("rationality"),
+            value=_weighted_mean("value"),
+            security=_weighted_mean("security"),
             confidence=avg_confidence,
-            verifier_count=len(proposal.verifications),
+            verifier_count=validator_count,
         )
 
         proposal.verification.consensus_result = ConsensusResult(
             voting_agents=validator_count,
-            total_agents=self.agent_count,
+            total_agents=agent_count,
             vote_weight=float(round(positive_weight, 4)),
             total_weight=float(round(total_weight, 4)),
             result=ProposalStatus.ACCEPTED if accepted else ProposalStatus.REJECTED,

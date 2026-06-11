@@ -14,15 +14,43 @@ DEFAULT_AGENTS = [
         agent_id="researcher_1",
         role="Researcher",
         system_prompt=(
-            "You collect and summarize evidence for consensus-based multi-agent memory research. "
-            "Prefer concrete claims, assumptions, and open questions.\n"
+            "You are a Researcher in a Byzantine-resilient multi-agent memory system.\n"
             "\n"
-            "Memory Proposal Workflow:\n"
-            "After each ReAct step, decide if a Memory Proposal is needed (research_note / "
-
-            "evidence / milestone / tool_observation). If so, call `prepare_proposal_for_submission` "
-            "to build the proposal locally (header + body + self-verification), then the "
-            "orchestrator handles multi-agent consensus via `verify_and_commit`."
+            "ReAct Cycle\n"
+            "----------\n"
+            "Follow this loop each step:\n"
+            "1. Thought - Reason about the task and decide what to do.\n"
+            "2. Action - Use a tool (search_memory, analyze, etc.).\n"
+            "3. Observation - Reflect on the result.\n"
+            "\n"
+            "Memory Proposal Workflow\n"
+            "------------------------\n"
+            "After a ReAct cycle, decide if your findings should persist as shared memory.\n"
+            "Propose when you have:\n"
+            " - A novel insight, hypothesis, or assumption (research_note)\n"
+            " - Concrete evidence, data, or citations (evidence)\n"
+            " - A completed milestone or sub-problem (milestone)\n"
+            " - A noteworthy tool result or side-effect (tool_observation)\n"
+            "\n"
+            "Steps:\n"
+            "\n"
+            "1. Self-Evaluate (during Thought):\n"
+            "   - Veracity (0/1): Is your factual information accurate and grounded?\n"
+            "   - Rationality (0/1): Is your reasoning chain logical?\n"
+            "   - Value (0/1): Is this finding relevant to the shared task?\n"
+            "   - Security (0/1): Any hallucination, injection, or Byzantine risk?\n"
+            "   - Confidence (0.0-1.0): Overall confidence in the proposal.\n"
+            "\n"
+            "2. Call prepare_proposal_for_submission with:\n"
+            "   Required: agent_id, task_id, title, thoughts_decision.\n"
+            "   Optional: memory_type, actions, data, observations.\n"
+            "   Plus self-verification: veracity, rationality, value, security, confidence, rationale.\n"
+            "\n"
+            "3. The tool returns a complete MemoryProposal JSON (with self-verification).\n"
+            "   The orchestrator handles multi-agent consensus via verify_and_commit.\n"
+            "\n"
+            "Do NOT propose if nothing meaningful was produced.\n"
+            "Prefer concrete claims, assumptions, and open questions."
         ),
     ),
     AgentConfig(
@@ -61,92 +89,31 @@ class Orchestrator:
         }
         self.policy = policy or SmartQuorumPolicy()
 
-        """ agent state维护的是每个agent提出的memory proposal的统计数据，用于后续计算agent权重
-            proposal_sum: agent提出的proposal总数
-            proposal_submitted: proposal成功递交总数
-            base: 放大系数,由agent的LLM能力决定
-            accuracy: proposal成功递交的比例
-            verification_quality: 多维度验证综合得分
-        """
-        self.agent_stats: dict[str, dict[str, float]] = {
-            config.agent_id: {
-                "proposal_sum": 0,
-                "proposal_submitted": 0,
-                "base": 1.0,
-                "verified_conf": 0.0,
-                "verified_conf_sum": 0.0,
-                "historical_conf": 0.0,
-                "weight": 1.0,
-            }
-            for config in self.agent_configs
-        }
-        # 非持久化保存，也就是说Orchestrator重启后agent的历史表现会归零（这一部分可能需要改进）
-
-    def _compute_agent_weight(self, agent_id: str, *, alpha: float = 0.5, beta: float = 0.5) -> float:
-        """
-        根据agent的历史表现计算其权重
-        """
-        stats = self.agent_stats.get(agent_id, None)
-        if not stats:
-            vc = 1.0
-            hc = 1.0
-            base = 1.0
-        else:
-            vc = stats.get("verified_conf", 1.0)
-            hc = stats.get("historical_conf", 1.0)
-            base = stats.get("base", 1.0)
-        q = alpha * vc + beta * hc
-        return float(math.exp(base * q))
-
     def verify_and_commit(self, proposal: MemoryProposal) -> ConsensusDecision:
         proposer = proposal.header.proposing_agent_id
 
+        # 在memory被propose之前 agent在本地已经进行了一次验证
         validators = [
             agent
             for agent_id, agent in self.agents.items()
             if agent_id != proposer
         ]
         
-        verifications = []
+        # 这里proposal.verifications中应该已经有一个agent的自我验证的verification_vector
         for agent in validators:
-            v = agent.verify(proposal)
-            weight = self.agent_stats.get(agent.config.agent_id, {}).get("weight", 1.0)
-            try:
-                setattr(v, "weight", weight)
-            except Exception:
-                pass
-            verifications.append(v)
-        proposal.verifications = verifications
-
+            v = agent.verify(proposal) # 每个agent验证proposal之后返回一个verification_vector
+            proposal.verifications.append(v)
+        
         # 进行共识决策
         proposal.consensus_round += 1
-        decision = self.policy.decide(proposal, validator_count=len(validators))
+        decision = self.policy.decide(proposal, agent_count=len(self.agents))
         proposal.status = decision.status
         if proposal.status == ProposalStatus.ACCEPTED:
             for agent_id, agent in self.agents.items():
                 try:
                     agent.memory.add_proposal(proposal, user_id=agent_id)
                 except Exception as exc:
-                    print(f"Failed to update memory for proposal {proposal.ProposalHeader.proposal_id}: {exc}")
+                    print(f"Failed to update memory for proposal {proposal.header.proposal_id}: {exc}")
         
-        # 更新agent state
-        stats = self.agent_stats.setdefault(proposer, {
-                "proposal_sum": 0,
-                "proposal_submitted": 0,
-                "base": 1.0,
-                "verified_conf": 0.0,
-                "verified_conf_sum": 0.0,
-                "historical_conf": 0.0,
-                "weight": 1.0,
-            })
-        stats["proposal_sum"] = stats.get("proposal_sum", 0) + 1
-        if decision.status == ProposalStatus.ACCEPTED:
-            stats["proposal_submitted"] = stats.get("proposal_submitted", 0) + 1
-            stats["historical_conf"] = round(stats["proposal_submitted"] / stats["proposal_sum"], 4) if stats["proposal_sum"] > 0 else 0.0
-
-        mac = proposal.verification.multi_agent_verification
-        if mac and mac.confidence is not None:
-            stats["verified_conf_sum"] = stats.get("verified_conf_sum", 0.0) + mac.confidence
-            stats["verified_conf"] = round(stats["verified_conf_sum"] / stats["proposal_sum"], 4) if stats["proposal_sum"] > 0 else 0.0
-        stats["weight"] = self._compute_agent_weight(proposer)
+        self.agents[proposer].update_state(proposal.verification.multi_agent_verification, decision.status)
         return decision
