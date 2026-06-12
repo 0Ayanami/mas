@@ -4,59 +4,77 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-import json
-from mas_framework.models import MemoryProposal, SelfVerification, ToolCall
-from camel.toolkits import FunctionTool
+from typing import Any, Callable, Dict, List, Optional
 
-ToolFunc = Callable[..., str]
-
-
-@dataclass(frozen=True)
-class ToolSpec:
-    name: str
-    description: str
-    func: ToolFunc
+from camel.toolkits import FunctionTool, SearchToolkit, FileWriteToolkit
 
 
 class ToolRegistry:
     def __init__(self) -> None:
-        self._tools: dict[str, ToolSpec] = {}
-        self.history: list[ToolCall] = []
+        self._tools: Dict[str, FunctionTool] = {}
 
-    def register(self, spec: ToolSpec) -> None:
-        if spec.name in self._tools:
-            raise ValueError(f"Tool already registered: {spec.name}")
-        self._tools[spec.name] = spec
+    def register_function(
+        self,
+        fn: Callable[..., Any],
+        name: Optional[str] = None,
+    ) -> FunctionTool:
+        tool = FunctionTool(fn)
+        tool_name = name or tool.get_function_name()
 
-    def register_multiple(self, specs: list[ToolSpec]) -> None:
-        for spec in specs:
-            self.register(spec)
+        if tool_name in self._tools:
+            raise ValueError(f"Tool '{tool_name}' already exists in registry.")
 
-    def call(self, name: str, **kwargs: Any) -> str:
+        self._tools[tool_name] = tool
+        return tool
+
+    def register_tool(
+        self,
+        tool: FunctionTool,
+        name: Optional[str] = None,
+    ) -> FunctionTool:
+        tool_name = name or tool.get_function_name()
+
+        if tool_name in self._tools:
+            raise ValueError(f"Tool '{tool_name}' already exists in registry.")
+
+        self._tools[tool_name] = tool
+        return tool
+
+    def register_toolkit(
+        self,
+        toolkit: Any,
+        only: Optional[List[str]] = None,
+    ) -> None:
+        for tool in toolkit.get_tools():
+            tool_name = tool.get_function_name()
+            if only is not None and tool_name not in only:
+                continue
+            self.register_tool(tool)
+
+    def get_tool(self, name: str) -> FunctionTool:
         if name not in self._tools:
-            known = "", "".join(sorted(self._tools))
-            raise KeyError(f"Unknown tool '{name}'. Known tools: {known}")
-        result = self._tools[name].func(**kwargs)
-        self.history.append(ToolCall(name=name, arguments=kwargs, result=result))
-        return result
+            raise KeyError(f"Tool '{name}' not found.")
+        return self._tools[name]
 
-    def camel_tools(self) -> list[ToolFunc]:
-        return [spec.func for spec in self._tools.values()]
+    def get_tools(self) -> List[FunctionTool]:
+        return list(self._tools.values())
 
-    def describe(self) -> str:
-        return "\n".join(f"- {spec.name}: {spec.description}" for spec in self._tools.values())
+    def names(self) -> List[str]:
+        return list(self._tools.keys())
 
-def build_default_tool_registry(
-    memory_search: Callable[[str, int], str] | None = None,
-) -> ToolRegistry:
+
+def build_default_tool_registry(functions: List[Callable[..., Any]]) -> ToolRegistry:
     registry = ToolRegistry()
-    if memory_search is not None:
-        registry.register(
-            ToolSpec(
-                name="search_memory",
-                description="Search accepted shared memory proposals.",
-                func=memory_search,
-            )
-        )
+
+    # 自定义函数工具
+    for f in functions:
+        registry.register_function(f)
+
+    # CAMEL 自带 toolkit
+    search_toolkit = SearchToolkit()
+    registry.register_toolkit(search_toolkit)
+
+    file_write_toolkit = FileWriteToolkit(working_directory="./outputs")
+    registry.register_toolkit(file_write_toolkit)
 
     return registry

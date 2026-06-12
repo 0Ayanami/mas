@@ -7,51 +7,14 @@ from mas_framework.consensus import SmartQuorumPolicy
 from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, ConsensusDecision, MemoryProposal, ProposalStatus
 from mas_framework.tools import ToolRegistry, build_default_tool_registry
+from mas_framework.utils.loader import load_system_prompts
  
 
 DEFAULT_AGENTS = [
     AgentConfig(
         agent_id="researcher_1",
         role="Researcher",
-        system_prompt=(
-            "You are a Researcher in a Byzantine-resilient multi-agent memory system.\n"
-            "\n"
-            "ReAct Cycle\n"
-            "----------\n"
-            "Follow this loop each step:\n"
-            "1. Thought - Reason about the task and decide what to do.\n"
-            "2. Action - Use a tool (search_memory, analyze, etc.).\n"
-            "3. Observation - Reflect on the result.\n"
-            "\n"
-            "Memory Proposal Workflow\n"
-            "------------------------\n"
-            "After a ReAct cycle, decide if your findings should persist as shared memory.\n"
-            "Propose when you have:\n"
-            " - A novel insight, hypothesis, or assumption (research_note)\n"
-            " - Concrete evidence, data, or citations (evidence)\n"
-            " - A completed milestone or sub-problem (milestone)\n"
-            " - A noteworthy tool result or side-effect (tool_observation)\n"
-            "\n"
-            "Steps:\n"
-            "\n"
-            "1. Self-Evaluate (during Thought):\n"
-            "   - Veracity (0/1): Is your factual information accurate and grounded?\n"
-            "   - Rationality (0/1): Is your reasoning chain logical?\n"
-            "   - Value (0/1): Is this finding relevant to the shared task?\n"
-            "   - Security (0/1): Any hallucination, injection, or Byzantine risk?\n"
-            "   - Confidence (0.0-1.0): Overall confidence in the proposal.\n"
-            "\n"
-            "2. Call prepare_proposal_for_submission with:\n"
-            "   Required: agent_id, task_id, title, thoughts_decision.\n"
-            "   Optional: memory_type, actions, data, observations.\n"
-            "   Plus self-verification: veracity, rationality, value, security, confidence, rationale.\n"
-            "\n"
-            "3. The tool returns a complete MemoryProposal JSON (with self-verification).\n"
-            "   The orchestrator handles multi-agent consensus via verify_and_commit.\n"
-            "\n"
-            "Do NOT propose if nothing meaningful was produced.\n"
-            "Prefer concrete claims, assumptions, and open questions."
-        ),
+        system_prompt=load_system_prompts,
     ),
     AgentConfig(
         agent_id="method_critic",
