@@ -22,6 +22,16 @@ The framework is intentionally small but extensible:
 | 2026-06-08 | 共识机制完善 | `src/mas_framework/consensus.py` |
 | 2026-06-09 | 验证过程梳理 | `src/mas_framework/orchestrator.py` |
 
+#TODO 系统的工作流
+整个系统模拟分布式的多智能体协作系统，每个agent都有自己的任务和状态，通过共识机制协调和决策。
+
+#TODO 什么时候提案memory？
+通过prompt让agent决定什么时候提案memory。agent在完成一步任务后，显式的返回一个flag，工作流中捕获这一flag，此时进入memory proposal的构建阶段。
+
+#TODO proposal的构建过程
+首先基于规则的方法构建proposal的header，然后使用prompt让agent自行总结重要信息，即proposal的body。再对proposal进行自我验证和打分，confidence超过一个阈值后，proposal被提交给其他agent进行验证共识过程。
+
+
 ## Quick Start
 
 ```powershell
