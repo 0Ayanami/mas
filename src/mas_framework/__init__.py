@@ -1,4 +1,4 @@
-"""Consensus-memory multi-agent research framework."""
+﻿"""Consensus-memory multi-agent research framework."""
 
 from mas_framework.models import (
     AgentConfig,
@@ -6,15 +6,18 @@ from mas_framework.models import (
     MemoryProposal,
     ProposalStatus,
     VerificationVector,
+    AgentState,
+    SelfVerification,
 )
 from mas_framework.orchestrator import Orchestrator as ResearchOrchestrator
 
 __all__ = [
     "AgentConfig",
+    "AgentState",
     "ConsensusDecision",
     "MemoryProposal",
     "ProposalStatus",
     "ResearchOrchestrator",
+    "SelfVerification",
     "VerificationVector",
 ]
-

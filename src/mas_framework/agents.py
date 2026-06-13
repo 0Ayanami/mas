@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import json
@@ -7,9 +7,10 @@ from typing import Protocol
 import math
 from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, MemoryProposal, VerificationVector, AgentState, SelfVerification, ProposalStatus, MultiAgentVerificationSummary
-from mas_framework.tools import build_default_tool_registry, create_proposal_creation_toolkit, ToolRegistry
-from mas_framework.utils.loader import load_verify_prompts
+from mas_framework.tools import build_default_tool_registry, ToolRegistry
+from mas_framework.utils.loader import load_verify_prompts, load_memory_proposal_skill
 from jinja2 import Template
+
 
 class AgentProtocol(Protocol):
     config: AgentConfig
@@ -58,7 +59,7 @@ class Agent:
         return ChatAgent(
             model=model,
             system_message=system_message,
-            tools=self.tools.camel_tools(),
+            tools=self.tools,
         )
 
     def run(self, prompt: str) -> str:
@@ -66,6 +67,8 @@ class Agent:
 
         message = BaseMessage.make_user_message(role_name=self.config.role, content=prompt)
         response = self._agent.step(message)
+        if isinstance(response, tuple):
+            response = response[0]
         return response.msgs[0].content
     
     def create_proposal(self):
@@ -130,43 +133,56 @@ class Agent:
             rationale=rationale,
             conf_threshold=self.config.conf_threshold,
             verifier_id=self.config.agent_id,
-            weight=self.state["weight"],
+            weight=self.state.get("weight", 0.0),
         )
 
-    def self_verify(self, proposal: MemoryProposal):
+    def self_verify(self, proposal: MemoryProposal) -> bool:
+        """Self-verify and submit the proposal if it passes."""
         vector = self.verify(proposal)
         if vector.vote_result:
             proposal.verifications = []
             proposal.verifications.append(vector)
-            sf = SelfVerification(veracity=vector.veracity, rationality=vector.rationality, 
-                                  value=vector.value, security=vector.security, confidence=vector.confidence,
-                                    rationale=vector.rationale)
-            proposal.verification.self_verification = sf
-            self.submit_proposal(proposal)
-        return None
-    
-    def submit_proposal(self, proposal: MemoryProposal): 
-        """
-        agent提出memory proposal，进行本地验证之后提交，开启多智能体验证共识机制。
-        """   
+            proposal.verification.self_verification = SelfVerification(
+                veracity=vector.veracity,
+                rationality=vector.rationality,
+                value=vector.value,
+                security=vector.security,
+                confidence=vector.confidence,
+                rationale=vector.rationale,
+            )
+        else:
+            proposal.status = ProposalStatus.REJECTED
+        self.state.proposal_sum += 1
+
+    def submit_proposal(self, proposal: MemoryProposal):
+        """Submit the proposal to the orchestrator for multi-agent verification."""
         pass
 
-    def update_state(self, mac: MultiAgentVerificationSummary, status:ProposalStatus):
-        # 更新agent state
-        self.state["proposal_sum"] += 1
+    def update_state(self, mac: MultiAgentVerificationSummary, status: ProposalStatus):
+        """Update agent state after consensus decision."""
+        self.state.proposal_sum += 1
         if status == ProposalStatus.ACCEPTED:
-            self.state["proposal_submitted"] += 1
-        self.state["historical_conf"] = round(self.state["proposal_submitted"] / self.state["proposal_sum"], 4) if self.state["proposal_sum"] > 0 else 0.0
+            self.state.proposal_submitted += 1
+        self.state.historical_conf = round(
+            self.state.proposal_submitted / self.state.proposal_sum, 4
+        ) if self.state.proposal_sum > 0 else 0.0
 
         if mac and mac.confidence is not None:
-            self.state["verified_conf_sum"] += mac.confidence
-            self.state["verified_conf"] = round(self.state["verified_conf_sum"] / self.state["proposal_sum"], 4) if self.state["proposal_sum"] > 0 else 0.0
-        self.state["weight"] = self._compute_agent_weight()
+            self.state.verified_conf_sum += mac.confidence
+            self.state.verified_conf = round(
+                self.state.verified_conf_sum / self.state.proposal_sum, 4
+            ) if self.state.proposal_sum > 0 else 0.0
+        self.state.weight = self._compute_agent_weight()
 
-def create_agent(config: AgentConfig) -> AgentProtocol:
-    if bool(os.getenv("OPENAI_API_KEY")):
-        try:
-            return Agent(config)
-        except Exception as exc:
-            print(f"Agent init failed for {config.agent_id}; Error: {exc}")
-    return None
+
+def create_agent(config: AgentConfig) -> AgentProtocol | None:
+    """Factory function to create an agent with CAMEL backend."""
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
+    if not api_key:
+        print(f"Warning: No API key found for {config.agent_id}. Agent will not be backed by LLM.")
+        return None
+    try:
+        return Agent(config)
+    except Exception as exc:
+        print(f"Agent init failed for {config.agent_id}; Error: {exc}")
+        return None

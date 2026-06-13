@@ -22,7 +22,7 @@ class ToolRegistry:
         tool_name = name or tool.get_function_name()
 
         if tool_name in self._tools:
-            raise ValueError(f"Tool '{tool_name}' already exists in registry.")
+            raise ValueError(f"Tool \"{tool_name}\" already exists in registry.")
 
         self._tools[tool_name] = tool
         return tool
@@ -35,7 +35,7 @@ class ToolRegistry:
         tool_name = name or tool.get_function_name()
 
         if tool_name in self._tools:
-            raise ValueError(f"Tool '{tool_name}' already exists in registry.")
+            raise ValueError(f"Tool \"{tool_name}\" already exists in registry.")
 
         self._tools[tool_name] = tool
         return tool
@@ -53,7 +53,7 @@ class ToolRegistry:
 
     def get_tool(self, name: str) -> FunctionTool:
         if name not in self._tools:
-            raise KeyError(f"Tool '{name}' not found.")
+            raise KeyError(f"Tool \"{name}\" not found.")
         return self._tools[name]
 
     def get_tools(self) -> List[FunctionTool]:
@@ -70,11 +70,8 @@ def build_default_tool_registry(functions: List[Callable[..., Any]]) -> ToolRegi
     for f in functions:
         registry.register_function(f)
 
-    # CAMEL 自带 toolkit
-    search_toolkit = SearchToolkit()
-    registry.register_toolkit(search_toolkit)
-
-    file_write_toolkit = FileWriteToolkit(working_directory="./outputs")
-    registry.register_toolkit(file_write_toolkit)
+    # CAMEL built-in toolkits
+    registry.register_toolkit(SearchToolkit())
+    registry.register_toolkit(FileWriteToolkit(working_directory="./outputs"))
 
     return registry

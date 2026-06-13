@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from statistics import mean
 
@@ -47,14 +47,17 @@ class SmartQuorumPolicy:
         def _weighted_mean(attr: str) -> float:
             if total_weight <= 0:
                 return mean(getattr(vote, attr) for vote in proposal.verifications)
-            return round(sum(getattr(vote, attr) * getattr(vote, "weight", 1.0) for vote in proposal.verifications) / total_weight, 4)
-        
-        # 得到阈值
+            return round(
+                sum(getattr(vote, attr) * getattr(vote, "weight", 1.0) for vote in proposal.verifications)
+                / total_weight,
+                4,
+            )
+
         threshold = self.threshold_for(proposal, validator_count)
         accepted = vote_ratio >= threshold
+        avg_confidence = _weighted_mean("confidence")
 
-        avg_confidence = round(_weighted_mean("confidence"), 4)
-
+        # Update proposal verification summary
         proposal.verification.multi_agent_verification = MultiAgentVerificationSummary(
             veracity=_weighted_mean("veracity"),
             rationality=_weighted_mean("rationality"),

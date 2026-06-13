@@ -1,0 +1,29 @@
+{
+  "task": "Analyze the impact of large language models on software development practices. Consider changes in code generation, debugging, documentation, and team collaboration. Identify key benefits, risks, and emerging best practices.",
+  "topic": "technology",
+  "mode": "mock",
+  "num_accepted": 1,
+  "results": [
+    {
+      "proposal_id": "ca32656f",
+      "agent_id": "researcher_1",
+      "title": "Analysis by Researcher",
+      "thoughts": "Analyzed the input and identified key patterns using Researcher expertise.",
+      "actions": "Read source material; Extracted key facts; Cross-referenced findings",
+      "data": {
+        "key_insight_1": "Important finding A",
+        "key_insight_2": "Important finding B"
+      },
+      "observations": "Data supports the main hypothesis; Several edge cases identified",
+      "confidence": 1.0,
+      "verification_summary": {
+        "veracity": 1.0,
+        "rationality": 1.0,
+        "value": 1.0,
+        "security": 1.0,
+        "overall_confidence": 1.0
+      },
+      "consensus": "accepted"
+    }
+  ]
+}

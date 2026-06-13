@@ -1,20 +1,20 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
-import math
 from mas_framework.agents import AgentProtocol, create_agent
 from mas_framework.consensus import SmartQuorumPolicy
 from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, ConsensusDecision, MemoryProposal, ProposalStatus
-from mas_framework.tools import ToolRegistry, build_default_tool_registry
 from mas_framework.utils.loader import load_system_prompts
- 
+
+# Load system prompt once as a string
+_SYSTEM_PROMPT = load_system_prompts()
 
 DEFAULT_AGENTS = [
     AgentConfig(
         agent_id="researcher_1",
         role="Researcher",
-        system_prompt=load_system_prompts,
+        system_prompt=_SYSTEM_PROMPT,
     ),
     AgentConfig(
         agent_id="method_critic",
@@ -59,7 +59,7 @@ class Orchestrator:
         validators = [
             agent
             for agent_id, agent in self.agents.items()
-            if agent_id != proposer
+            if agent_id != proposer and agent is not None
         ]
         
         # 这里proposal.verifications中应该已经有一个agent的自我验证的verification_vector
