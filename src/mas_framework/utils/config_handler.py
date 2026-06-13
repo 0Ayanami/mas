@@ -1,5 +1,5 @@
 import yaml
-from path_tool import get_abs_path
+from mas_framework.utils.path_tool import get_abs_path
 
 _DEFAULT_PROMPT_PATH = get_abs_path("configs/prompts.yml")
 _DEFAULT_SKILL_PATH = get_abs_path("configs/skills.yml")

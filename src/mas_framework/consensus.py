@@ -17,9 +17,6 @@ class SmartQuorumPolicy:
         self.min_threshold = min_threshold
 
     def threshold_for(self, proposal: MemoryProposal, validator_count: int) -> float:
-        """
-        计算当前系统的Quorum阈值
-        """
         pass
 
     def decide(self, proposal: MemoryProposal, agent_count: int) -> ConsensusDecision:

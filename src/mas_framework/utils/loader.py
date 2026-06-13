@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from path_tool import get_abs_path
-from config_handler import prompt_config, skill_config
+from mas_framework.utils.path_tool import get_abs_path
+from mas_framework.utils.config_handler import prompt_config, skill_config
 
 
 def load_system_prompts() -> dict[str, str]:

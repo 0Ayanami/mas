@@ -1,14 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import json
 import re
 from typing import Protocol
 import math
-from memory import Mem0MemoryBackend
-from models import AgentConfig, MemoryProposal, VerificationVector,AgentState, SelfVerification, ProposalStatus, MultiAgentVerificationSummary
-from tools import build_default_tool_registry, create_proposal_creation_toolkit, ToolRegistry
-from utils.loader import load_verify_prompts
+from mas_framework.memory import Mem0MemoryBackend
+from mas_framework.models import AgentConfig, MemoryProposal, VerificationVector, AgentState, SelfVerification, ProposalStatus, MultiAgentVerificationSummary
+from mas_framework.tools import build_default_tool_registry, create_proposal_creation_toolkit, ToolRegistry
+from mas_framework.utils.loader import load_verify_prompts
 from jinja2 import Template
 
 class AgentProtocol(Protocol):
@@ -36,7 +36,7 @@ class Agent:
     def __init__(self, config: AgentConfig, memory: Mem0MemoryBackend | None = None, tools: ToolRegistry | None = None):
         self.config = config
         self.memory = memory or Mem0MemoryBackend()
-        self.tools = tools or build_default_tool_registry(memory_search=self.memory.search)
+        self.tools = tools or build_default_tool_registry([self.memory.search]).get_tools()
         self._agent = self._build_agent()
         self.state = AgentState()
 
@@ -67,6 +67,18 @@ class Agent:
         message = BaseMessage.make_user_message(role_name=self.config.role, content=prompt)
         response = self._agent.step(message)
         return response.msgs[0].content
+    
+    def create_proposal(self):
+        """
+    Header：proposal id（需要在mas全局中unique）, task id（orchestrator在工作流中分配）, timestamp(有默认值), proposing agent signature(使用agent id), 
+            parent proposal list（可为空） ,message body hash(), proposal summary（需要agent.step）
+    
+    Body（以下字段按实际情况填写，部分内容可以留空）:Thoughts：thoughts abstract(思考路径关键信息摘要), key decision points & decision results(涉及到的主要决策点信息和决策结果摘要)
+        Action：action list(执行的操作列表，如action_1: api function call...; action_2: web sesearch with keywords...; action_3: interaction with agent...)
+        Data：data list(任务相关的关键信息/数据列表，agent本地检索到的提供关键信息摘要，公开渠道获取的提供关键信息摘要和访问链接等)
+        Observations：result list(当前取得的主要结果或观测情况列表，如result_1: complete subtask_i...; result_2: fetched data from url...)
+        """
+        pass
 
     def _compute_agent_weight(self, alpha: float = 0.5, beta: float = 0.5) -> float:
         """
@@ -133,7 +145,10 @@ class Agent:
             self.submit_proposal(proposal)
         return None
     
-    def submit_proposal(self, proposal: MemoryProposal):    
+    def submit_proposal(self, proposal: MemoryProposal): 
+        """
+        agent提出memory proposal，进行本地验证之后提交，开启多智能体验证共识机制。
+        """   
         pass
 
     def update_state(self, mac: MultiAgentVerificationSummary, status:ProposalStatus):
