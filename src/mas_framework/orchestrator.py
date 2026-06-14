@@ -6,6 +6,7 @@ from mas_framework.consensus import SmartQuorumPolicy
 from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, ConsensusDecision, MemoryProposal, ProposalStatus
 from mas_framework.utils.loader import load_system_prompts
+from mas_framework.proposal_tools import Proposal_Tools
 
 # Load system prompt once as a string
 _SYSTEM_PROMPT = load_system_prompts()
@@ -64,7 +65,7 @@ class Orchestrator:
         
         # 这里proposal.verifications中应该已经有一个agent的自我验证的verification_vector
         for agent in validators:
-            v = agent.verify(proposal) # 每个agent验证proposal之后返回一个verification_vector
+            v = Proposal_Tools.verify(agent, proposal) # 每个agent验证proposal之后返回一个verification_vector
             proposal.verifications.append(v)
         
         # 进行共识决策
@@ -78,5 +79,7 @@ class Orchestrator:
                 except Exception as exc:
                     print(f"Failed to update memory for proposal {proposal.header.proposal_id}: {exc}")
         
-        self.agents[proposer].update_state(proposal.verification.multi_agent_verification, decision.status)
+        Proposal_Tools.update_state(agent=self.agents[proposer], 
+                                    mac=proposal.verification.multi_agent_verification,
+                                    status=decision.status)
         return decision
