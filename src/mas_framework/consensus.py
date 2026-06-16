@@ -16,11 +16,12 @@ class SmartQuorumPolicy:
         self.base_threshold = base_threshold
         self.min_threshold = min_threshold
 
-    def threshold_for(self, proposal: MemoryProposal, validator_count: int) -> float:
+    def threshold_for(self, proposal: MemoryProposal, validator_count: int) -> float | None:
         pass
 
     def decide(self, proposal: MemoryProposal, agent_count: int) -> ConsensusDecision:
         validator_count = len(proposal.verifications)
+        # 决策时需要确保参与共识的agent数大于等于3
         if not proposal.verifications or validator_count <= 3:
             return ConsensusDecision(
                 proposal_id=proposal.proposal_id,
@@ -54,6 +55,8 @@ class SmartQuorumPolicy:
             )
 
         threshold = self.threshold_for(proposal, validator_count)
+        if threshold is None:
+            threshold = self.base_threshold
         accepted = vote_ratio >= threshold
         avg_confidence = _weighted_mean("confidence")
 

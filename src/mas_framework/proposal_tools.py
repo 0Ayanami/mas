@@ -1,11 +1,16 @@
+from typing import Any
+
 from mas_framework.agents import Agent
 import math
-from mas_framework.prompts import load_verify_prompts
+from mas_framework.utils.loader import (load_propose_prompts, load_memory_proposal_skill,
+                                         load_verify_prompts, load_create_proposal_prompts)
 from mas_framework.models import (VerificationVector, MemoryProposal, ProposalStatus, 
-                                  SelfVerification, MultiAgentVerificationSummary, AgentState)
+                                  SelfVerification, MultiAgentVerificationSummary, AgentState,
+                                  ProposalHeader, ProposalBody)
 from jinja2 import Template
 import re
 import json
+import hashlib
 
 class Proposal_Tools:
     def __init__(self):
@@ -16,24 +21,94 @@ class Proposal_Tools:
         """
         根据agent的历史表现计算其权重
         """
-        vc = state.get("verified_conf", 0.0)
-        hc = state.get("historical_conf", 0.0)
-        base = state.get("base", 1.0)
+        vc = getattr(state, "verified_conf", 0.0)
+        hc = getattr(state, "historical_conf", 0.0)
+        base = getattr(state, "base", 1.0)
         q = alpha * vc + beta * hc
         return float(math.exp(base * q))
 
     @staticmethod
-    def create_proposal():
-        """
-    Header：proposal id（需要在mas全局中unique）, task id（orchestrator在工作流中分配）, timestamp(有默认值), proposing agent signature(使用agent id), 
-            parent proposal list（可为空） ,message body hash(), proposal summary（需要agent.step）
-    
-    Body（以下字段按实际情况填写，部分内容可以留空）:Thoughts：thoughts abstract(思考路径关键信息摘要), key decision points & decision results(涉及到的主要决策点信息和决策结果摘要)
-        Action：action list(执行的操作列表，如action_1: api function call...; action_2: web sesearch with keywords...; action_3: interaction with agent...)
-        Data：data list(任务相关的关键信息/数据列表，agent本地检索到的提供关键信息摘要，公开渠道获取的提供关键信息摘要和访问链接等)
-        Observations：result list(当前取得的主要结果或观测情况列表，如result_1: complete subtask_i...; result_2: fetched data from url...)
-        """
-        pass
+    def _extract_json(response: str) -> dict[str, Any]:
+        match = re.search(r"\{.*\}", response, re.DOTALL)
+        if not match:
+            raise ValueError(f"Could not find JSON in response: {response}")
+        try:
+            return json.loads(match.group(0))
+        except Exception as exc:
+            raise ValueError(f"Failed to parse JSON response: {exc}\nResponse: {response}") from exc
+
+    @staticmethod
+    def _as_list(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    @classmethod
+    def should_propose_memory(
+        cls,
+        agent: Agent,
+        *,
+        react_trace: str,
+        task_context: str = "",
+    ) -> dict[str, Any]:
+        """Ask the agent whether this completed ReAct cycle should become memory."""
+        template = Template(load_propose_prompts())
+        prompt = template.render(memory_proposal_skill=load_memory_proposal_skill(),
+                                  react_trace=react_trace, task_context=task_context)
+        
+        res = agent.run(prompt)
+        payload = cls._extract_json(res)
+
+        signal = str(payload.get("signal", "")).upper()
+        propose = bool(payload.get("propose_memory")) or signal == "MEMORY_PROPOSE"
+        payload["propose_memory"] = propose
+        payload["signal"] = "MEMORY_PROPOSE" if propose else "NO_MEMORY"
+
+        payload.setdefault("memory_type", "research_note")
+        return payload
+
+    @classmethod
+    def create_proposal(
+        cls,
+        *,
+        agent: Agent,
+        task_id: str,
+        proposal_id: str,
+        react_trace: str,
+        memory_type: str = "research_note",
+        parent_proposal_ids: list[str] | None = None,
+        task_context: str = "",
+    ) -> MemoryProposal:
+
+        template = Template(load_create_proposal_prompts())
+        prompt = template.render(react_trace=react_trace, task_context=task_context)
+
+        res = agent.run(prompt)
+        payload = cls._extract_json(res)
+
+        summary = str(payload.get("proposal_summary", "")).strip()
+        body = ProposalBody(
+            thoughts=payload.get("thoughts") or {},
+            actions=cls._as_list(payload.get("actions")),
+            data=cls._as_list(payload.get("data")),
+            observations=cls._as_list(payload.get("observations")),
+        )
+        body_content = body.model_dump_json(indent=2)
+        body_hash = hashlib.md5(body_content.encode("utf-8")).hexdigest()
+
+        header = ProposalHeader(
+            task_id=task_id,
+            proposal_id=proposal_id,
+            agent_id=agent.config.agent_id,
+            agent_signature=agent.config.agent_id,
+            parent_proposals=parent_proposal_ids or [],
+            proposal_summary=summary,
+            memory_type=memory_type,  # type: ignore[arg-type]
+            body_hash=body_hash,
+        )
+        return MemoryProposal(header=header, body=body)
     
     @classmethod
     def verify(cls, agent: Agent, proposal: MemoryProposal) -> VerificationVector:
@@ -42,15 +117,7 @@ class Proposal_Tools:
         
         response = agent.run(prompt)
 
-        match = re.search(r"\{.*\}", response, re.DOTALL)
-        if not match:
-            raise ValueError(f"Could not find JSON in verifier response: {response}")
-
-        payload_str = match.group(0)
-        try:
-            payload = json.loads(payload_str)
-        except Exception as exc:
-            raise ValueError(f"Failed to parse JSON from verifier response: {exc}\nResponse: {response}")
+        payload = cls._extract_json(response)
 
         def to_bool(value: object) -> bool:
             if isinstance(value, bool):
@@ -76,7 +143,7 @@ class Proposal_Tools:
             rationale=rationale,
             conf_threshold=agent.config.conf_threshold,
             verifier_id=agent.config.agent_id,
-            weight=agent.state.get("weight", 0.0),
+            weight=getattr(agent.state, "weight", 1.0),
         )
     
     @classmethod
@@ -118,5 +185,4 @@ class Proposal_Tools:
     
     @staticmethod
     def submit_proposal(agent: Agent, proposal: MemoryProposal):
-        """Submit the proposal to the orchestrator for multi-agent verification."""
         pass

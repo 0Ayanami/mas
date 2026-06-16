@@ -1,2 +1,4 @@
 system_prompt_path: prompts/system_prompt.md
 verify_prompt_path: prompts/verify_prompt.md
+propose_prompt_path: prompts/propose_prompt.md
+create_proposal_prompt_path: prompts/create_proposal_prompt.md

@@ -33,6 +33,34 @@ def load_verify_prompts() -> str:
     except Exception as e:
         raise e
     
+def load_propose_prompts() -> str:
+    """
+    加载提案提示词
+    """
+    try:
+        propose_prompt_path = get_abs_path(prompt_config["propose_prompt_path"])
+    except KeyError as e:
+        raise e
+
+    try:
+        return Path(propose_prompt_path).read_text(encoding="utf-8")
+    except Exception as e:
+        raise e
+
+def load_create_proposal_prompts() -> str:
+    """
+    加载创建提案提示词
+    """
+    try:
+        create_proposal_prompt_path = get_abs_path(prompt_config["create_proposal_prompt_path"])
+    except KeyError as e:
+        raise e
+
+    try:
+        return Path(create_proposal_prompt_path).read_text(encoding="utf-8")
+    except Exception as e:
+        raise e
+    
 def load_memory_proposal_skill() -> str:
     """
     加载记忆提案的skill

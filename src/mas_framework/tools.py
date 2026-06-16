@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 from typing import Any, Callable, Dict, List, Optional
 
-from camel.toolkits import FunctionTool, SearchToolkit, FileWriteToolkit
+from camel.toolkits import FunctionTool, SearchToolkit
+
+try:
+    from camel.toolkits import FileWriteToolkit as _FileToolkit
+except ImportError:
+    from camel.toolkits import FileToolkit as _FileToolkit
 
 
 class ToolRegistry:
@@ -72,6 +77,9 @@ def build_default_tool_registry(functions: List[Callable[..., Any]]) -> ToolRegi
 
     # CAMEL built-in toolkits
     registry.register_toolkit(SearchToolkit())
-    registry.register_toolkit(FileWriteToolkit(working_directory="./outputs"))
+    try:
+        registry.register_toolkit(_FileToolkit(working_directory="./outputs"))
+    except TypeError:
+        registry.register_toolkit(_FileToolkit())
 
     return registry

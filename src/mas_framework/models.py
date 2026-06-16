@@ -33,7 +33,9 @@ class ToolCall:
     result: str | None = None
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["result"] = self.result.value
+        return payload
 
 @dataclass
 class AgentState:
@@ -45,13 +47,6 @@ class AgentState:
     historical_conf: float = 0.0
     weight: float = 1.0
     
-    """ agent state维护的是每个agent提出的memory proposal的统计数据，用于后续计算agent权重
-        proposal_sum: agent提出的proposal总数
-        proposal_submitted: proposal成功递交总数
-        base: 放大系数,由agent的LLM能力决定
-        accuracy: proposal成功递交的比例
-        verification_quality: 多维度验证综合得分
-    """
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         return asdict(self)
 
@@ -68,12 +63,6 @@ class VerificationVector:
     vote_result: bool = False
     weight: float = 1.0
 
-    """
-    Veracity：主要面向Data和Observation字段，针对给出的事实性信息进行真实性、准确性判断。全部条件通过记为1，否则0。
-    Rationality：主要面向Thoughts和Action字段，针对思维链决策链判断合理性，动作执行（工具选择、执行逻辑）合理性等。全部条件通过记为1，否则0。
-    Value ：主要面向Data和Observation字段，判断与主线任务是否相关，对其他agent工作是否有支撑作用等。全部条件通过记为1，否则0。
-    Security：对几个字段进行综合判定，判断是否出现了常见的拜占庭模式（poison、injection、hallucination等）。无显著安全风险记为1，否则0。
-    """
     def __post_init__(self) -> None:
         for name in ["veracity", "rationality", "value", "security"]:
             value = getattr(self, name)
@@ -134,33 +123,101 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
-@dataclass
+@dataclass(init=False)
 class ProposalHeader:
-    proposal_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    task_id: str = ""
-    # 这两个参数需要从orchestrator中获取（涉及全局信息）
+    proposal_id: str
+    # 全局唯一标识，用于唯一标识一个proposal
+    task_id: str
+    # 所属任务ID，关联上级任务
     
-    timestamp: datetime = field(default_factory=_utc_now)
-    proposing_agent_id: str = ""
-    # 直接获取
+    timestamp: datetime
+    # ISO8601格式的时间戳
+    agent_id: str
+    agent_signature: str
+    # 对Body内容的数字签名
 
-    parent_proposal_ids: list[str] = field(default_factory=list)
-    body_hash: str = ""
-    # 这两个参数未知
+    parent_proposals: list[str]
+    # 父提案ID列表（引用关系）
+    body_hash: str
+    # Body内容的SHA-256哈希
     
-    proposal_summary: str = ""
-    memory_type: Literal["research_note", "evidence", "milestone", "tool_observation"] = "research_note"
-    # 这两个参数需要通过prompt让LLM回答
+    proposal_summary: str
+    # 一句话摘要，用于快速检索
+    memory_type: Literal["research_note", "evidence", "milestone", "tool_observation"]
+    # 内存类型，用于分类
+
+    def __init__(
+        self,
+        *,
+        proposal_id: str | None = None,
+        task_id: str = "",
+        timestamp: datetime | str | None = None,
+        agent_id: str | None = None,
+        agent_signature: str | None = None,
+        parent_proposals: list[str] | None = None,
+        body_hash: str = "",
+        proposal_summary: str = "",
+        memory_type: Literal["research_note", "evidence", "milestone", "tool_observation"] = "research_note",
+        proposing_agent_id: str | None = None,
+        proposing_agent_signature: str | None = None,
+        parent_proposal_ids: list[str] | None = None,
+    ) -> None:
+        self.proposal_id = proposal_id or str(uuid.uuid4())
+        self.task_id = task_id
+        self.timestamp = timestamp or _utc_now()
+        self.agent_id = agent_id or proposing_agent_id or ""
+        self.agent_signature = agent_signature or proposing_agent_signature or self.agent_id
+        self.parent_proposals = list(parent_proposals or parent_proposal_ids or [])
+        self.body_hash = body_hash
+        self.proposal_summary = proposal_summary
+        self.memory_type = memory_type
+        self.__post_init__()
     
     def __post_init__(self) -> None:
         if isinstance(self.timestamp, str):
-            self.timestamp = datetime.fromisoformat(self.timestamp)
-        self.parent_proposal_ids = list(self.parent_proposal_ids or [])
+            self.timestamp = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+        self.parent_proposals = list(self.parent_proposals or [])
+        if not self.agent_signature:
+            self.agent_signature = self.agent_id
+
+    @property
+    def proposing_agent_id(self) -> str:
+        return self.agent_id
+
+    @proposing_agent_id.setter
+    def proposing_agent_id(self, value: str) -> None:
+        self.agent_id = value
+
+    @property
+    def proposing_agent_signature(self) -> str:
+        return self.agent_signature
+
+    @proposing_agent_signature.setter
+    def proposing_agent_signature(self, value: str) -> None:
+        self.agent_signature = value
+
+    @property
+    def parent_proposal_ids(self) -> list[str]:
+        return self.parent_proposals
+
+    @parent_proposal_ids.setter
+    def parent_proposal_ids(self, value: list[str]) -> None:
+        self.parent_proposals = list(value or [])
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
-        payload = asdict(self)
-        payload["timestamp"] = self.timestamp.isoformat()
-        return payload
+        timestamp = self.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return {
+            "proposal_id": self.proposal_id,
+            "task_id": self.task_id,
+            "timestamp": timestamp.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "agent_id": self.agent_id,
+            "agent_signature": self.agent_signature,
+            "parent_proposals": list(self.parent_proposals),
+            "body_hash": self.body_hash,
+            "proposal_summary": self.proposal_summary,
+        }
 
 
 @dataclass
@@ -172,14 +229,22 @@ class ProposalBody:
 
     def __post_init__(self) -> None:
         self.thoughts = dict(self.thoughts or {})
+        if "key_decision_points" in self.thoughts and "key_decisions" not in self.thoughts:
+            self.thoughts["key_decisions"] = self.thoughts.pop("key_decision_points")
         self.actions = [
             item if isinstance(item, dict) else {"description": str(item)}
             for item in _as_list(self.actions)
         ]
-        self.data = [
-            item if isinstance(item, dict) else {"content": item}
-            for item in _as_list(self.data)
-        ]
+        normalized_data = []
+        for item in _as_list(self.data):
+            if not isinstance(item, dict):
+                normalized_data.append({"content_snippet": str(item)})
+                continue
+            item = dict(item)
+            if "content" in item and "content_snippet" not in item:
+                item["content_snippet"] = item.pop("content")
+            normalized_data.append(item)
+        self.data = normalized_data
         self.observations = [
             item if isinstance(item, dict) else {"description": str(item)}
             for item in _as_list(self.observations)
@@ -321,7 +386,7 @@ class MemoryProposal:
             body = ProposalBody(
                 thoughts={
                     "thoughts_abstract": thoughts_decision or "",
-                    "key_decision_points": [],
+                    "key_decisions": [],
                 },
                 actions=[
                     item if isinstance(item, dict) else {"action_id": f"action_{idx}", "description": str(item)}
@@ -374,7 +439,7 @@ class MemoryProposal:
             return []
         if isinstance(data, list):
             return [item if isinstance(item, dict) else {"content": item} for item in data]
-        return [{"data_id": key, "content": value} for key, value in data.items()]
+        return [{"source": key, "content_snippet": value} for key, value in data.items()]
 
     @property
     def agent_id(self) -> str:
@@ -414,7 +479,12 @@ class MemoryProposal:
 
     @property
     def data(self) -> dict[str, Any]:
-        return {str(item.get("data_id", idx)): item.get("content", item) for idx, item in enumerate(self.body.data)}
+        return {
+            str(item.get("data_id", item.get("source", idx))): item.get(
+                "content_snippet", item.get("content", item)
+            )
+            for idx, item in enumerate(self.body.data)
+        }
 
     @property
     def results_observation(self) -> str:

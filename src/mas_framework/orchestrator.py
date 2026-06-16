@@ -7,6 +7,7 @@ from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, ConsensusDecision, MemoryProposal, ProposalStatus
 from mas_framework.utils.loader import load_system_prompts
 from mas_framework.proposal_tools import Proposal_Tools
+import uuid
 
 # Load system prompt once as a string
 _SYSTEM_PROMPT = load_system_prompts()
@@ -53,6 +54,62 @@ class Orchestrator:
         }
         self.policy = policy or SmartQuorumPolicy()
 
+    def run_react_memory_cycle(
+        self,
+        *,
+        agent_id: str,
+        task_prompt: str,
+        task_id: str,
+        task_context: str = "",
+        parent_proposal_ids: list[str] | None = None,
+    ) -> tuple[str, MemoryProposal | None, ConsensusDecision | None]:
+        """Run one agent ReAct cycle and optionally turn it into consensus memory.
+
+        Workflow:
+        1. agent completes a ReAct-like step and returns a trace/result
+        2. agent is prompted for an explicit MEMORY_PROPOSE flag
+        3. if flagged, orchestrator builds proposal Header and asks agent for Body
+        4. proposer self-verifies; only passing proposals enter consensus
+        5. accepted proposals are committed to every agent's memory
+        """
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            raise KeyError(f"Unknown or unavailable agent: {agent_id}")
+
+        react_trace = agent.run(task_prompt)
+        flag = Proposal_Tools.should_propose_memory(
+            agent,
+            react_trace=react_trace,
+            task_context=task_context or task_prompt,
+        )
+        if not flag.get("propose_memory"):
+            return react_trace, None, None
+
+        proposal = Proposal_Tools.create_proposal(
+            agent=agent,
+            task_id=task_id,
+            react_trace=react_trace,
+            proposal_id=str(uuid.uuid4()),
+            memory_type=str(flag.get("memory_type", "research_note")),
+            parent_proposal_ids=parent_proposal_ids,
+            task_context=task_context or task_prompt,
+        )
+        Proposal_Tools.submit_proposal(agent, proposal)
+
+        if not Proposal_Tools.self_verify(agent, proposal):
+            return react_trace, proposal, ConsensusDecision(
+                proposal_id=proposal.proposal_id,
+                status=ProposalStatus.REJECTED,
+                quorum_size=1,
+                positive_votes=0.0,
+                average_confidence=proposal.self_confidence,
+                threshold=agent.config.conf_threshold,
+                rationale="Proposal failed proposer self-verification.",
+            )
+
+        decision = self.verify_and_commit(proposal)
+        return react_trace, proposal, decision
+
     def verify_and_commit(self, proposal: MemoryProposal) -> ConsensusDecision:
         proposer = proposal.header.proposing_agent_id
 
@@ -74,6 +131,8 @@ class Orchestrator:
         proposal.status = decision.status
         if proposal.status == ProposalStatus.ACCEPTED:
             for agent_id, agent in self.agents.items():
+                if agent is None:
+                    continue
                 try:
                     agent.memory.add_proposal(proposal, user_id=agent_id)
                 except Exception as exc:
