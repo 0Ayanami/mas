@@ -81,7 +81,9 @@ class Proposal_Tools:
         parent_proposal_ids: list[str] | None = None,
         task_context: str = "",
     ) -> MemoryProposal:
-
+        """
+        使用prompt让agent总结memory，然后构建memory proposal的header和body。
+        """
         template = Template(load_create_proposal_prompts())
         prompt = template.render(react_trace=react_trace, task_context=task_context)
 
@@ -95,8 +97,11 @@ class Proposal_Tools:
             data=cls._as_list(payload.get("data")),
             observations=cls._as_list(payload.get("observations")),
         )
-        body_content = body.model_dump_json(indent=2)
-        body_hash = hashlib.md5(body_content.encode("utf-8")).hexdigest()
+
+        # 计算body的hash值
+        body_content = body.model_dump_json(mode="json", indent=2)
+        body_content = json.dumps(body_content, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        body_hash = hashlib.sha256(body_content.encode("utf-8")).hexdigest()
 
         header = ProposalHeader(
             task_id=task_id,
@@ -105,7 +110,7 @@ class Proposal_Tools:
             agent_signature=agent.config.agent_id,
             parent_proposals=parent_proposal_ids or [],
             proposal_summary=summary,
-            memory_type=memory_type,  # type: ignore[arg-type]
+            memory_type=memory_type,
             body_hash=body_hash,
         )
         return MemoryProposal(header=header, body=body)
@@ -116,7 +121,6 @@ class Proposal_Tools:
         prompt = template.render(proposal=proposal.model_dump_json(indent=2))
         
         response = agent.run(prompt)
-
         payload = cls._extract_json(response)
 
         def to_bool(value: object) -> bool:
@@ -167,7 +171,7 @@ class Proposal_Tools:
         return vector.vote_result
     
     @classmethod
-    def update_state(cls, agent: Agent, mac: MultiAgentVerificationSummary, status: ProposalStatus):
+    def update_state(cls, agent: Agent, avg_confidence: float, status: ProposalStatus):
         """Update agent state after consensus decision."""
         agent.state.proposal_sum += 1
         if status == ProposalStatus.ACCEPTED:
@@ -176,13 +180,9 @@ class Proposal_Tools:
             agent.state.proposal_submitted / agent.state.proposal_sum, 4
         ) if agent.state.proposal_sum > 0 else 0.0
 
-        if mac and mac.confidence is not None:
-            agent.state.verified_conf_sum += mac.confidence
+        if avg_confidence is not None:
+            agent.state.verified_conf_sum += avg_confidence
             agent.state.verified_conf = round(
                 agent.state.verified_conf_sum / agent.state.proposal_sum, 4
             ) if agent.state.proposal_sum > 0 else 0.0
         agent.state.weight = cls._compute_agent_weight(agent.state)
-    
-    @staticmethod
-    def submit_proposal(agent: Agent, proposal: MemoryProposal):
-        pass

@@ -4,7 +4,7 @@ from pathlib import Path
 from mas_framework.agents import AgentProtocol, create_agent
 from mas_framework.consensus import SmartQuorumPolicy
 from mas_framework.memory import Mem0MemoryBackend
-from mas_framework.models import AgentConfig, ConsensusDecision, MemoryProposal, ProposalStatus
+from mas_framework.models import AgentConfig, ConsensusResult, MemoryProposal, ProposalStatus
 from mas_framework.utils.loader import load_system_prompts
 from mas_framework.proposal_tools import Proposal_Tools
 import uuid
@@ -52,68 +52,57 @@ class Orchestrator:
         self.agents: dict[str, AgentProtocol] = {
             config.agent_id: create_agent(config) for config in self.agent_configs
         }
+        self.agent_count = len(self.agents)
         self.policy = policy or SmartQuorumPolicy()
 
-    def run_react_memory_cycle(
+    def propose_memory_from_trace(
         self,
         *,
         agent_id: str,
-        task_prompt: str,
         task_id: str,
+        react_trace: str,
         task_context: str = "",
         parent_proposal_ids: list[str] | None = None,
-    ) -> tuple[str, MemoryProposal | None, ConsensusDecision | None]:
-        """Run one agent ReAct cycle and optionally turn it into consensus memory.
-
-        Workflow:
-        1. agent completes a ReAct-like step and returns a trace/result
-        2. agent is prompted for an explicit MEMORY_PROPOSE flag
-        3. if flagged, orchestrator builds proposal Header and asks agent for Body
-        4. proposer self-verifies; only passing proposals enter consensus
-        5. accepted proposals are committed to every agent's memory
-        """
+    ) -> MemoryProposal | None:
+        
         agent = self.agents.get(agent_id)
         if agent is None:
             raise KeyError(f"Unknown or unavailable agent: {agent_id}")
 
-        react_trace = agent.run(task_prompt)
         flag = Proposal_Tools.should_propose_memory(
             agent,
             react_trace=react_trace,
-            task_context=task_context or task_prompt,
+            task_context=task_context,
         )
         if not flag.get("propose_memory"):
-            return react_trace, None, None
+            return None, None
 
         proposal = Proposal_Tools.create_proposal(
             agent=agent,
             task_id=task_id,
             react_trace=react_trace,
-            proposal_id=str(uuid.uuid4()),
             memory_type=str(flag.get("memory_type", "research_note")),
             parent_proposal_ids=parent_proposal_ids,
-            task_context=task_context or task_prompt,
+            task_context=task_context,
         )
-        Proposal_Tools.submit_proposal(agent, proposal)
 
         if not Proposal_Tools.self_verify(agent, proposal):
-            return react_trace, proposal, ConsensusDecision(
-                proposal_id=proposal.proposal_id,
-                status=ProposalStatus.REJECTED,
-                quorum_size=1,
-                positive_votes=0.0,
-                average_confidence=proposal.self_confidence,
-                threshold=agent.config.conf_threshold,
-                rationale="Proposal failed proposer self-verification.",
-            )
+            # 自我验证阶段未通过
+            proposal.consensus_result = ConsensusResult(
+            voting_agents=0,
+            total_agents=self.agent_count,
+            vote_weight=0.0,
+            total_weight=0.0,
+            result=proposal.status,
+        )
+            return proposal
+        
+        return self.verify_and_commit(proposal)
 
-        decision = self.verify_and_commit(proposal)
-        return react_trace, proposal, decision
+    def verify_and_commit(self, proposal: MemoryProposal) -> MemoryProposal:
+        proposer = proposal.agent_id
 
-    def verify_and_commit(self, proposal: MemoryProposal) -> ConsensusDecision:
-        proposer = proposal.header.proposing_agent_id
-
-        # 在memory被propose之前 agent在本地已经进行了一次验证
+        # 在memory被propose之前 agent在本地已经进行了一次验证,收集系统中其他的agent作为验证器
         validators = [
             agent
             for agent_id, agent in self.agents.items()
@@ -127,8 +116,10 @@ class Orchestrator:
         
         # 进行共识决策
         proposal.consensus_round += 1
-        decision = self.policy.decide(proposal, agent_count=len(self.agents))
-        proposal.status = decision.status
+        decision = self.policy.decide(proposal, agent_count=self.agent_count)
+        proposal.consensus_result = decision
+        proposal.status = decision.result
+
         if proposal.status == ProposalStatus.ACCEPTED:
             for agent_id, agent in self.agents.items():
                 if agent is None:
@@ -139,6 +130,6 @@ class Orchestrator:
                     print(f"Failed to update memory for proposal {proposal.header.proposal_id}: {exc}")
         
         Proposal_Tools.update_state(agent=self.agents[proposer], 
-                                    mac=proposal.verification.multi_agent_verification,
-                                    status=decision.status)
-        return decision
+                                    avg_confidence=proposal.multi_confidence,
+                                    status=proposal.status)
+        return proposal

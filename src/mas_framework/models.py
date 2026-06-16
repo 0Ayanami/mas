@@ -52,15 +52,22 @@ class AgentState:
 
 @dataclass
 class VerificationVector:
+    # 四维分数
     veracity: int
     rationality: int
     value: int
     security: int
+    # 加权计算的置信度
     confidence: float
+    # 理由
     rationale: str
+    # 验证agent id
     verifier_id: str
+    # 置信度阈值
     conf_threshold: float
+    # 投票结果
     vote_result: bool = False
+    # agent权重
     weight: float = 1.0
 
     def __post_init__(self) -> None:
@@ -79,7 +86,7 @@ class VerificationVector:
         rationality: bool | None = None,
         value: bool | None = None,
         security: bool | None = None,
-        rationale: str,
+        rationale: str = "",
         verifier_id: str,
         conf_threshold: float = 0.7,
         weight: float = 1.0,
@@ -91,10 +98,10 @@ class VerificationVector:
         },
     ) -> VerificationVector:
         votes = {
-            "veracity": int(veracity),
-            "rationality": int(rationality),
-            "value": int(value),
-            "security": int(security),
+            "veracity": int(veracity or 0),
+            "rationality": int(rationality or 0),
+            "value": int(value or 0),
+            "security": int(security or 0),
         }
         confidence = sum(votes[key] * weights[key] for key in votes)
         vote_result = confidence >= conf_threshold
@@ -231,10 +238,12 @@ class ProposalBody:
         self.thoughts = dict(self.thoughts or {})
         if "key_decision_points" in self.thoughts and "key_decisions" not in self.thoughts:
             self.thoughts["key_decisions"] = self.thoughts.pop("key_decision_points")
+
         self.actions = [
             item if isinstance(item, dict) else {"description": str(item)}
             for item in _as_list(self.actions)
         ]
+
         normalized_data = []
         for item in _as_list(self.data):
             if not isinstance(item, dict):
@@ -245,6 +254,7 @@ class ProposalBody:
                 item["content_snippet"] = item.pop("content")
             normalized_data.append(item)
         self.data = normalized_data
+
         self.observations = [
             item if isinstance(item, dict) else {"description": str(item)}
             for item in _as_list(self.observations)
@@ -259,11 +269,11 @@ class SelfVerification:
     """
     对准备propose的memory进行自我验证
     """
-    veracity: int = 1
-    rationality: int = 1
-    value: int = 1
-    security: int = 1
-    confidence: float = 0.0
+    veracity: int | None = None
+    rationality: int | None = None
+    value: int | None = None
+    security: int | None = None
+    confidence: float | None = None
     rationale: str = ""
 
     def __post_init__(self) -> None:
@@ -296,10 +306,10 @@ class MultiAgentVerificationSummary:
 
 @dataclass
 class ConsensusResult:
-    voting_agents: int = 0
-    total_agents: int = 0
-    vote_weight: float = 0.0
-    total_weight: float = 0.0
+    voting_agents: int | None = None
+    total_agents: int | None = None
+    vote_weight: float | None = None
+    total_weight: float | None = None
     result: ProposalStatus = ProposalStatus.PENDING
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
@@ -308,17 +318,13 @@ class ConsensusResult:
 
 @dataclass
 class ProposalVerification:
-    self_verification: SelfVerification = field(default_factory=SelfVerification)
-    multi_agent_verification: MultiAgentVerificationSummary = field(
-        default_factory=MultiAgentVerificationSummary
-    )
-    consensus_result: ConsensusResult = field(default_factory=ConsensusResult)
+    self_verification: SelfVerification | None = None
+    multi_agent_verification: MultiAgentVerificationSummary | None = None
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         return {
             "self_verification": self.self_verification.model_dump(mode=mode),
             "multi_agent_verification": self.multi_agent_verification.model_dump(mode=mode),
-            "consensus_result": self.consensus_result.model_dump(mode=mode),
         }
 
 
@@ -327,6 +333,7 @@ class MemoryProposal:
     header: ProposalHeader
     body: ProposalBody
     verification: ProposalVerification
+    consensus_result: ConsensusResult
     status: ProposalStatus = ProposalStatus.PENDING
     consensus_round: int = 0
     verifications: list[VerificationVector]
@@ -337,23 +344,27 @@ class MemoryProposal:
         header: ProposalHeader | dict[str, Any] | None = None,
         body: ProposalBody | dict[str, Any] | None = None,
         verification: ProposalVerification | dict[str, Any] | None = None,
+        consensus_result: ConsensusResult | dict[str, Any] | None = None,
+
         status: ProposalStatus | str = ProposalStatus.PENDING,
         consensus_round: int = 0,
         verifications: list[VerificationVector | dict[str, Any]] | None = None,
-
+        
+        # Header
         agent_id: str | None = None,
         task_id: str | None = None,
         memory_type: Literal["research_note", "evidence", "milestone", "tool_observation"] = "research_note",
-        title: str | None = None,
-        thoughts_decision: str | None = None,
-        action: str | list[Any] | None = None,
-        results_observation: str | list[Any] | None = None,
-        self_confidence: float | None = None,
-        data: dict[str, Any] | list[Any] | None = None,
+        summary: str | None = None,
         proposal_id: str | None = None,
         timestamp: datetime | str | None = None,
         parent_proposal_ids: list[str] | None = None,
         proposing_agent_signature: str | None = None,
+
+        # Body
+        thoughts_decision: str | None = None,
+        action: str | list[Any] | None = None,
+        results_observation: str | list[Any] | None = None,
+        data: dict[str, Any] | list[Any] | None = None,
     ) -> None:
         self.status = ProposalStatus(status)
         self.consensus_round = consensus_round
@@ -370,7 +381,7 @@ class MemoryProposal:
                 proposing_agent_id=agent_id or "",
                 proposing_agent_signature=proposing_agent_signature or agent_id or "",
                 parent_proposal_ids=parent_proposal_ids or [],
-                proposal_summary=title or "",
+                proposal_summary=summary or "",
                 memory_type=memory_type,
             )
         elif isinstance(header, dict):
@@ -405,11 +416,7 @@ class MemoryProposal:
         elif isinstance(body, dict):
             body = ProposalBody(**body)
 
-        if verification is None:
-            verification = ProposalVerification(
-                self_verification=SelfVerification(confidence=self_confidence or 0.0)
-            )
-        elif isinstance(verification, dict):
+        if isinstance(verification, dict):
             verification = ProposalVerification(
                 self_verification=(
                     verification.get("self_verification")
@@ -421,17 +428,16 @@ class MemoryProposal:
                     if isinstance(verification.get("multi_agent_verification"), MultiAgentVerificationSummary)
                     else MultiAgentVerificationSummary(**verification.get("multi_agent_verification", {}))
                 ),
-                consensus_result=(
-                    verification.get("consensus_result")
-                    if isinstance(verification.get("consensus_result"), ConsensusResult)
-                    else ConsensusResult(**verification.get("consensus_result", {}))
-                ),
             )
+
+        if isinstance(consensus_result, dict):
+            consensus_result = ConsensusResult(**consensus_result)
 
         self.header = header
         self.body = body
         self.verification = verification
         self.header.body_hash = self.body_hash
+        self.consensus_result = consensus_result
 
     @staticmethod
     def _normalize_data(data: dict[str, Any] | list[Any] | None) -> list[dict[str, Any]]:
@@ -454,7 +460,7 @@ class MemoryProposal:
         return self.header.memory_type
 
     @property
-    def title(self) -> str:
+    def summary(self) -> str:
         return self.header.proposal_summary
 
     @property
@@ -468,6 +474,10 @@ class MemoryProposal:
     @property
     def self_confidence(self) -> float:
         return self.verification.self_verification.confidence
+    
+    @property
+    def multi_confidence(self) -> float:
+        return self.verification.multi_agent_verification.confidence
 
     @property
     def thoughts_decision(self) -> str:
@@ -501,7 +511,7 @@ class MemoryProposal:
         return self.body_hash
 
     def short_label(self) -> str:
-        return f"{self.title} ({self.proposal_id[:8]})"
+        return f"{self.summary} ({self.proposal_id[:8]})"
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         self.header.body_hash = self.body_hash
@@ -509,6 +519,7 @@ class MemoryProposal:
             "header": self.header.model_dump(mode=mode),
             "body": self.body.model_dump(mode=mode),
             "verification": self.verification.model_dump(mode=mode),
+            "consensus_result": self.consensus_result.model_dump(mode=mode),
             "status": self.status.value,
             "consensus_round": self.consensus_round,
             "verifications": [item.model_dump(mode=mode) for item in self.verifications],
@@ -520,23 +531,3 @@ class MemoryProposal:
     @classmethod
     def model_validate_json(cls, payload: str) -> "MemoryProposal":
         return cls(**json.loads(payload))
-
-
-@dataclass
-class ConsensusDecision:
-    proposal_id: str
-    status: ProposalStatus
-    quorum_size: int
-    positive_votes: float
-    average_confidence: float
-    threshold: float
-    rationale: str
-
-    def __post_init__(self) -> None:
-        if isinstance(self.status, str):
-            self.status = ProposalStatus(self.status)
-
-    def model_dump(self, mode: str = "python") -> dict[str, Any]:
-        payload = asdict(self)
-        payload["status"] = self.status.value
-        return payload
