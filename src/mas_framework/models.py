@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
-from camel.types import ModelPlatformType, ModelType
-
 class ProposalStatus(str, Enum):
     PENDING = "pending"
     ACCEPTED = "accepted"
@@ -17,14 +16,25 @@ class ProposalStatus(str, Enum):
 @dataclass
 class AgentConfig:
     agent_id: str
-    model_platform: ModelPlatformType = ModelPlatformType.DEFAULT
-    model_type: ModelType = ModelType.DEFAULT
-    model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
-
     role: str = ""
     system_prompt: str = ""
-
     conf_threshold: float = 0.7
+    model: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
+    model_info: dict[str, Any] | None = None
+    max_tool_iterations: int = 10
+    reflect_on_tool_use: bool = True
+    model_client: Any | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.model is None:
+            self.model = (
+                os.getenv("AUTOGEN_MODEL")
+                or os.getenv("DEFAULT_MODEL_TYPE")
+                or "gpt-4o-mini"
+            )
 
 @dataclass
 class ToolCall:
@@ -33,9 +43,7 @@ class ToolCall:
     result: str | None = None
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
-        payload = asdict(self)
-        payload["result"] = self.result.value
-        return payload
+        return asdict(self)
 
 @dataclass
 class AgentState:
@@ -279,9 +287,9 @@ class SelfVerification:
     def __post_init__(self) -> None:
         for name in ["veracity", "rationality", "value", "security"]:
             value = getattr(self, name)
-            if value not in (0, 1):
+            if value is not None and value not in (0, 1):
                 raise ValueError(f"{name} must be 0 or 1")
-        if not 0.0 <= self.confidence <= 1.0:
+        if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be between 0 and 1")
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
@@ -312,8 +320,14 @@ class ConsensusResult:
     total_weight: float | None = None
     result: ProposalStatus = ProposalStatus.PENDING
 
+    def __post_init__(self) -> None:
+        if isinstance(self.result, str):
+            self.result = ProposalStatus(self.result)
+
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["result"] = self.result.value
+        return payload
 
 
 @dataclass
@@ -323,8 +337,16 @@ class ProposalVerification:
 
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         return {
-            "self_verification": self.self_verification.model_dump(mode=mode),
-            "multi_agent_verification": self.multi_agent_verification.model_dump(mode=mode),
+            "self_verification": (
+                self.self_verification.model_dump(mode=mode)
+                if self.self_verification is not None
+                else None
+            ),
+            "multi_agent_verification": (
+                self.multi_agent_verification.model_dump(mode=mode)
+                if self.multi_agent_verification is not None
+                else None
+            ),
         }
 
 
@@ -355,6 +377,7 @@ class MemoryProposal:
         task_id: str | None = None,
         memory_type: Literal["research_note", "evidence", "milestone", "tool_observation"] = "research_note",
         summary: str | None = None,
+        title: str | None = None,
         proposal_id: str | None = None,
         timestamp: datetime | str | None = None,
         parent_proposal_ids: list[str] | None = None,
@@ -365,6 +388,7 @@ class MemoryProposal:
         action: str | list[Any] | None = None,
         results_observation: str | list[Any] | None = None,
         data: dict[str, Any] | list[Any] | None = None,
+        self_confidence: float | None = None,
     ) -> None:
         self.status = ProposalStatus(status)
         self.consensus_round = consensus_round
@@ -381,7 +405,7 @@ class MemoryProposal:
                 proposing_agent_id=agent_id or "",
                 proposing_agent_signature=proposing_agent_signature or agent_id or "",
                 parent_proposal_ids=parent_proposal_ids or [],
-                proposal_summary=summary or "",
+                proposal_summary=summary or title or "",
                 memory_type=memory_type,
             )
         elif isinstance(header, dict):
@@ -417,21 +441,37 @@ class MemoryProposal:
             body = ProposalBody(**body)
 
         if isinstance(verification, dict):
+            self_verification = verification.get("self_verification")
+            multi_agent_verification = verification.get("multi_agent_verification")
             verification = ProposalVerification(
                 self_verification=(
-                    verification.get("self_verification")
-                    if isinstance(verification.get("self_verification"), SelfVerification)
-                    else SelfVerification(**verification.get("self_verification", {}))
+                    self_verification
+                    if isinstance(self_verification, SelfVerification)
+                    else SelfVerification(**self_verification)
+                    if isinstance(self_verification, dict)
+                    else None
                 ),
                 multi_agent_verification=(
-                    verification.get("multi_agent_verification")
-                    if isinstance(verification.get("multi_agent_verification"), MultiAgentVerificationSummary)
-                    else MultiAgentVerificationSummary(**verification.get("multi_agent_verification", {}))
+                    multi_agent_verification
+                    if isinstance(multi_agent_verification, MultiAgentVerificationSummary)
+                    else MultiAgentVerificationSummary(**multi_agent_verification)
+                    if isinstance(multi_agent_verification, dict)
+                    else None
                 ),
+            )
+        elif verification is None:
+            verification = ProposalVerification(
+                self_verification=(
+                    SelfVerification(confidence=self_confidence)
+                    if self_confidence is not None
+                    else None
+                )
             )
 
         if isinstance(consensus_result, dict):
             consensus_result = ConsensusResult(**consensus_result)
+        elif consensus_result is None:
+            consensus_result = ConsensusResult()
 
         self.header = header
         self.body = body
@@ -464,6 +504,10 @@ class MemoryProposal:
         return self.header.proposal_summary
 
     @property
+    def title(self) -> str:
+        return self.summary
+
+    @property
     def proposal_id(self) -> str:
         return self.header.proposal_id
 
@@ -472,11 +516,15 @@ class MemoryProposal:
         return self.header.timestamp
 
     @property
-    def self_confidence(self) -> float:
+    def self_confidence(self) -> float | None:
+        if self.verification.self_verification is None:
+            return None
         return self.verification.self_verification.confidence
     
     @property
-    def multi_confidence(self) -> float:
+    def multi_confidence(self) -> float | None:
+        if self.verification.multi_agent_verification is None:
+            return None
         return self.verification.multi_agent_verification.confidence
 
     @property

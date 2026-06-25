@@ -6,7 +6,7 @@ This repository contains a first-pass multi-agent framework for the research dir
 
 The framework is intentionally small but extensible:
 
-- CAMEL `ChatAgent` adapter for LLM-backed agents.
+- AutoGen `AssistantAgent` adapter for LLM-backed agents.
 - Tool registry with file-reading and memory-search examples.
 - Structured `MemoryProposal` and `VerificationVector` models.
 - A basic smart-quorum consensus decision module.
@@ -16,7 +16,8 @@ The framework is intentionally small but extensible:
 | date | dev | relative-docs|
 | ---  | --- | --- |
 | 2026-06-04 | 初始版本 | `README.md` |
-| 2026-06-05 | 使用camel-ai 搭建multi-agent原型框架 | `src/mas_framework/tools.py`,`agents.py`,`orchestrator.py` |
+| 2026-06-05 | 搭建multi-agent原型框架 | `src/mas_framework/tools.py`,`agents.py`,`orchestrator.py` |
+| 2026-06-25 | 将Agent后端从CAMEL迁移到AutoGen 0.7 | `src/mas_framework/tools.py`,`agents.py`,`models.py` |
 | 2026-06-06 | memory模块完善 | `src/mas_framework/memory.py` |
 | 2026-06-07 | 基础数据类 | `src/mas_framework/models.py` |
 | 2026-06-08 | 共识机制完善 | `src/mas_framework/consensus.py` |
@@ -42,19 +43,14 @@ copy .env.example .env
 pytest
 ```
 
-To enable CAMEL-backed agents:
-
-```powershell
-uv pip install -e ".[camel,dev]"
-```
+AutoGen, mem0, and AgentDojo are installed as core project dependencies.
 
 ## Project Shape
 
 - `src/mas_framework/models.py`: shared schemas for proposals, verification, agents, and decisions.
-- `src/mas_framework/agents.py`: CAMEL adapter.
+- `src/mas_framework/agents.py`: AutoGen adapter.
 - `src/mas_framework/tools.py`: tool registry and default research tools.
 - `src/mas_framework/memory.py`: persistent shared memory store.
 - `src/mas_framework/consensus.py`: current quorum and decision mechanism.
 - `src/mas_framework/orchestrator.py`: multi-agent workflow.
 - `examples/run_research_demo.py`: executable demo.
-

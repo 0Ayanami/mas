@@ -5,14 +5,17 @@ description = "A multi-agent research framework for Byzantine-resilient memory s
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "agentdojo>=0.1.35",
+    "autogen-agentchat>=0.7,<0.8",
+    "autogen-ext[openai]>=0.7,<0.8",
+    "jinja2>=3.1",
+    "mem0ai>=2.0",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "rich>=13.7",
 ]
 
 [project.optional-dependencies]
-camel = [
-    "camel-ai>=0.2.70",
-    "python-dotenv>=1.0",
-    "rich>=13.7",
-]
 dev = [
     "pytest>=8.0",
 ]

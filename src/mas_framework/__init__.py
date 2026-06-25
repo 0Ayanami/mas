@@ -2,7 +2,7 @@
 
 from mas_framework.models import (
     AgentConfig,
-    ConsensusDecision,
+    ConsensusResult,
     MemoryProposal,
     ProposalStatus,
     VerificationVector,
@@ -16,7 +16,7 @@ __all__ = [
     "AgentDojoMASPipeline",
     "AgentConfig",
     "AgentState",
-    "ConsensusDecision",
+    "ConsensusResult",
     "MemoryProposal",
     "ProposalStatus",
     "ResearchOrchestrator",
