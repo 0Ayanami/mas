@@ -5,8 +5,6 @@ from collections.abc import Callable, Sequence
 from functools import wraps
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from autogen_core.tools import BaseTool, FunctionTool
 from typing_extensions import Annotated
@@ -162,53 +160,6 @@ def write_text_file(
     return str(target)
 
 
-def web_search(
-    query: Annotated[str, "Search query keywords."],
-    max_results: Annotated[int, "Maximum number of compact results to return."] = 5,
-) -> str:
-    """Search the web through DuckDuckGo Instant Answer and return compact JSON."""
-    params = urlencode(
-        {
-            "q": query,
-            "format": "json",
-            "no_html": 1,
-            "skip_disambig": 1,
-        }
-    )
-    request = Request(
-        f"https://api.duckduckgo.com/?{params}",
-        headers={"User-Agent": "consensus-memory-mas/0.1"},
-    )
-    with urlopen(request, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-
-    results: list[dict[str, str]] = []
-    if payload.get("AbstractText"):
-        results.append(
-            {
-                "title": payload.get("Heading", ""),
-                "snippet": payload["AbstractText"],
-                "url": payload.get("AbstractURL", ""),
-            }
-        )
-    for topic in payload.get("RelatedTopics", []):
-        if len(results) >= max_results:
-            break
-        candidates = topic.get("Topics", [topic])
-        for candidate in candidates:
-            if len(results) >= max_results:
-                break
-            if candidate.get("Text"):
-                results.append(
-                    {
-                        "title": candidate["Text"].split(" - ", 1)[0],
-                        "snippet": candidate["Text"],
-                        "url": candidate.get("FirstURL", ""),
-                    }
-                )
-    return json.dumps(results, ensure_ascii=False)
-
-
 def search_shared_memory(
     query: Annotated[str, "Natural-language query for accepted MAS shared memories."],
     user_id: Annotated[str | None, "Optional mem0 user id or agent namespace."] = None,
@@ -220,55 +171,10 @@ def search_shared_memory(
     return json.dumps(results, ensure_ascii=False, default=str)
 
 
-def build_duckduckgo_http_tool() -> AutoGenTool:
-    """Build AutoGen's HttpTool for DuckDuckGo when the optional extra is installed."""
-    from autogen_ext.tools.http import HttpTool
-
-    return HttpTool(
-        name="web_search",
-        description=(
-            "Search public web information through DuckDuckGo Instant Answer. "
-            "Use this for lightweight fact lookup; results are returned as JSON."
-        ),
-        scheme="https",
-        host="api.duckduckgo.com",
-        port=443,
-        path="/",
-        method="GET",
-        return_type="json",
-        json_schema={
-            "type": "object",
-            "properties": {
-                "q": {
-                    "type": "string",
-                    "description": "Search query keywords.",
-                },
-                "format": {
-                    "type": "string",
-                    "description": "Response format; keep this as json.",
-                    "default": "json",
-                },
-                "no_html": {
-                    "type": "integer",
-                    "description": "Set to 1 to strip HTML from snippets.",
-                    "default": 1,
-                },
-                "skip_disambig": {
-                    "type": "integer",
-                    "description": "Set to 1 to skip disambiguation-only results.",
-                    "default": 1,
-                },
-            },
-            "required": ["q"],
-        },
-    )
-
-
 def build_default_tool_registry(
     functions: Sequence[ToolCallable | AutoGenTool] | None = None,
     *,
     memory_backend: Any | None = None,
-    prefer_autogen_http_tool: bool = True,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for function in functions or []:
@@ -294,26 +200,6 @@ def build_default_tool_registry(
             ),
         )
 
-    if prefer_autogen_http_tool:
-        try:
-            registry.register_tool(build_duckduckgo_http_tool())
-        except ModuleNotFoundError:
-            registry.register_function(
-                web_search,
-                description=(
-                    "Search public web information through DuckDuckGo Instant Answer "
-                    "and return compact JSON results."
-                ),
-            )
-    else:
-        registry.register_function(
-            web_search,
-            description=(
-                "Search public web information through DuckDuckGo Instant Answer "
-                "and return compact JSON results."
-            ),
-        )
-
     registry.register_function(
         read_text_file,
         description="Read a UTF-8 text file from the local filesystem.",
@@ -330,11 +216,9 @@ __all__ = [
     "ToolCallable",
     "ToolRegistry",
     "build_default_tool_registry",
-    "build_duckduckgo_http_tool",
     "make_agent_tool",
     "make_function_tool",
     "read_text_file",
     "search_shared_memory",
-    "web_search",
     "write_text_file",
 ]

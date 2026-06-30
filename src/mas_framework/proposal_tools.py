@@ -75,7 +75,7 @@ class Proposal_Tools:
         *,
         agent: Agent,
         task_id: str,
-        proposal_id: str,
+        proposal_id: str | None = None,
         react_trace: str,
         memory_type: str = "research_note",
         parent_proposal_ids: list[str] | None = None,
@@ -99,9 +99,12 @@ class Proposal_Tools:
         )
 
         # 计算body的hash值
-        body_content = body.model_dump_json(mode="json", indent=2)
-        body_content = json.dumps(body_content, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        body_hash = hashlib.sha256(body_content.encode("utf-8")).hexdigest()
+        body_content = json.dumps(
+            body.model_dump(mode="json"),
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+        body_hash = hashlib.sha256(body_content).hexdigest()
 
         header = ProposalHeader(
             task_id=task_id,
@@ -157,6 +160,10 @@ class Proposal_Tools:
         if vector.vote_result:
             proposal.verifications = []
             proposal.verifications.append(vector)
+            if proposal.verification is None:
+                from mas_framework.models import ProposalVerification
+
+                proposal.verification = ProposalVerification()
             proposal.verification.self_verification = SelfVerification(
                 veracity=vector.veracity,
                 rationality=vector.rationality,

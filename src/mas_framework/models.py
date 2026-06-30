@@ -24,9 +24,12 @@ class AgentConfig:
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
-    model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
+    model_config_dict: dict[str, Any] = field(
+        default_factory=lambda: {"temperature": 0.0, "parallel_tool_calls": False}
+    )
     model_info: dict[str, Any] | None = None
     model_client: Any | None = field(default=None, repr=False, compare=False)
+    model_client_stream: bool = True
 
     # Tool Configuration
     max_tool_iterations: int = 10

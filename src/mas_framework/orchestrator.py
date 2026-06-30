@@ -75,11 +75,12 @@ class Orchestrator:
             task_context=task_context,
         )
         if not flag.get("propose_memory"):
-            return None, None
+            return None
 
         proposal = Proposal_Tools.create_proposal(
             agent=agent,
             task_id=task_id,
+            proposal_id=str(uuid.uuid4()),
             react_trace=react_trace,
             memory_type=str(flag.get("memory_type", "research_note")),
             parent_proposal_ids=parent_proposal_ids,

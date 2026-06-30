@@ -105,6 +105,7 @@ class Agent:
             name=_safe_agent_name(self.config.agent_id),
             description=self.config.role or self.config.agent_id,
             model_client=self._model_client,
+            model_client_stream=self.config.model_client_stream,
             system_message=self.config.system_prompt,
             tools=tools or None,
             reflect_on_tool_use=self.config.reflect_on_tool_use,
