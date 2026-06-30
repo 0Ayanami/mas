@@ -1,6 +1,6 @@
-﻿"""Multi-Agent Collaboration Workflow using CAMEL-AI.
+﻿"""Multi-Agent Collaboration Workflow using AutoGen.
 
-This example demonstrates a complete multi-agent collaboration workflow:
+This AutoGen example demonstrates a complete multi-agent collaboration workflow:
 1. Multiple specialized agents work together on a shared task
 2. Agents propose findings as structured memory proposals
 3. Other agents verify proposals through multi-dimension scoring
@@ -32,20 +32,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-# ── CAMEL-AI imports ────────────────────────────────────────────────────────
-from camel.agents import ChatAgent
-from camel.messages import BaseMessage
-from camel.models import ModelFactory
-from camel.toolkits import FunctionTool
-from camel.types import ModelPlatformType, ModelType
-
 # ── Framework imports ───────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from mas_framework.agents import Agent as FrameworkAgent
 from mas_framework.models import (
     AgentConfig,
     AgentState,
-    ConsensusDecision,
+    ConsensusResult,
     MemoryProposal,
     ProposalStatus,
     VerificationVector,
@@ -135,46 +129,14 @@ class MockAgent:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  REAL CAMEL AGENT — backed by an LLM via CAMEL-AI
+#  REAL AUTOGEN AGENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class CamelAgent:
-    """A CAMEL-AI ChatAgent wrapper that integrates with the MAS framework."""
+class AutoGenAgent(FrameworkAgent):
+    """AutoGen agent with the verification helpers used by this example."""
 
     def __init__(self, config: AgentConfig):
-        self.config = config
-        self.state = AgentState()
-        self._agent = self._build_agent()
-
-    def _build_agent(self) -> ChatAgent:
-        """Build a CAMEL ChatAgent with the given configuration."""
-        model = ModelFactory.create(
-            model_platform=self.config.model_platform,
-            model_type=self.config.model_type,
-            model_config_dict=self.config.model_config_dict,
-        )
-
-        system_message = BaseMessage.make_assistant_message(
-            role_name=self.config.role,
-            content=self.config.system_prompt,
-        )
-
-        return ChatAgent(
-            model=model,
-            system_message=system_message,
-        )
-
-    def run(self, prompt: str) -> str:
-        """Send a user message to the agent and get the response."""
-        msg = BaseMessage.make_user_message(
-            role_name=self.config.role,
-            content=prompt,
-        )
-        response = self._agent.step(msg)
-        # CAMEL step() can return ChatAgentResponse or a tuple
-        if isinstance(response, tuple):
-            response = response[0]
-        return response.msgs[0].content
+        super().__init__(config=config)
 
     def verify(self, proposal: MemoryProposal) -> VerificationVector:
         """Verify a proposal using the LLM and parse the structured response."""
@@ -306,16 +268,17 @@ class MultiAgentCollaborationOrchestrator:
                 # ── Phase 4: Consensus ──────────────────────────────────
                 print(f"  [Phase 4] Consensus...")
                 decision = self.policy.decide(proposal, agent_count=len(self.agents))
-                proposal.status = decision.status
+                proposal.consensus_result = decision
+                proposal.status = decision.result
 
-                if decision.status == ProposalStatus.ACCEPTED:
-                    print(f"  ✓ ACCEPTED (votes={decision.positive_votes:.2f}/{decision.quorum_size}, "
-                          f"confidence={decision.average_confidence:.2f})")
+                if decision.result == ProposalStatus.ACCEPTED:
+                    print(f"  ✓ ACCEPTED (weight={decision.vote_weight:.2f}/{decision.total_weight:.2f}, "
+                          f"confidence={proposal.multi_confidence:.2f})")
                     accepted_proposals.append(proposal)
                     self.shared_memory.append(proposal)
                 else:
-                    print(f"  ⨯ REJECTED (votes={decision.positive_votes:.2f}/{decision.quorum_size}, "
-                          f"confidence={decision.average_confidence:.2f})")
+                    print(f"  ⨯ REJECTED (weight={decision.vote_weight:.2f}/{decision.total_weight:.2f}, "
+                          f"confidence={proposal.multi_confidence or 0.0:.2f})")
 
                 # ── Phase 5: State update ───────────────────────────────
                 self._update_agent_states(agent_id, proposal, decision)
@@ -412,12 +375,12 @@ class MultiAgentCollaborationOrchestrator:
                 print(f"    {agent_id}: verification error — {e}")
 
     def _update_agent_states(
-        self, proposer_id: str, proposal: MemoryProposal, decision: ConsensusDecision
+        self, proposer_id: str, proposal: MemoryProposal, decision: ConsensusResult
     ) -> None:
         """Update all agents' states after a consensus round."""
         mac = proposal.verification.multi_agent_verification
         for agent_id, agent in self.agents.items():
-            agent.update_state(mac, decision.status)
+            agent.update_state(mac, decision.result)
 
     def _synthesize_results(
         self, task: str, proposals: list[MemoryProposal]
@@ -441,8 +404,8 @@ class MultiAgentCollaborationOrchestrator:
                     "security": p.verification.multi_agent_verification.security,
                     "overall_confidence": p.verification.multi_agent_verification.confidence,
                 },
-                "consensus": p.verification.consensus_result.result.value
-                if p.verification.consensus_result else "pending",
+                "consensus": p.consensus_result.result.value
+                if p.consensus_result else "pending",
             })
         return results
 
@@ -455,17 +418,15 @@ def create_agent_for_role(
     agent_id: str,
     role: str,
     system_prompt: str,
-    model_platform: ModelPlatformType = ModelPlatformType.DEFAULT,
-    model_type: ModelType = ModelType.DEFAULT,
+    model: str | None = None,
     use_mock: bool = False,
 ) -> Any:
-    """Create either a mock or a real CAMEL agent for a given role."""
+    """Create either a mock or a real AutoGen agent for a given role."""
     config = AgentConfig(
         agent_id=agent_id,
         role=role,
         system_prompt=system_prompt,
-        model_platform=model_platform,
-        model_type=model_type,
+        model=model,
         model_config_dict={"temperature": 0.2},
         conf_threshold=0.7,
     )
@@ -474,7 +435,7 @@ def create_agent_for_role(
         return MockAgent(config=config)
 
     try:
-        return CamelAgent(config=config)
+        return AutoGenAgent(config=config)
     except Exception as e:
         print(f"  ! Failed to create real agent for {agent_id}: {e}")
         print(f"  ! Falling back to mock agent.")
@@ -535,7 +496,7 @@ SCENARIOS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Multi-agent collaboration workflow using CAMEL-AI"
+        description="Multi-agent collaboration workflow using AutoGen"
     )
     parser.add_argument(
         "--topic", type=str, default="technology",
@@ -554,6 +515,10 @@ def main() -> None:
         "--verbose", action="store_true",
         help="Print detailed per-agent output",
     )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("outputs"),
+        help="Directory for the JSON result file.",
+    )
     args = parser.parse_args()
 
     # Load API key
@@ -564,7 +529,7 @@ def main() -> None:
         print("┌─────────────────────────────────────────────┐")
         print("│  Running in MOCK mode — no LLM API calls    │")
         print("│  Use --mock=false with valid API key for    │")
-        print("│  real CAMEL-AI backed agents                │")
+        print("│  real AutoGen-backed agents                 │")
         print("└─────────────────────────────────────────────┘")
     else:
         print(f"┌─────────────────────────────────────────────┐")
@@ -628,8 +593,8 @@ def main() -> None:
               f"Run with --topic to try different scenarios.")
 
     # Save results
-    output_dir = Path("outputs")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"collab_results_{int(time.time())}.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump({

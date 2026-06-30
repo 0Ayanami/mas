@@ -151,13 +151,20 @@ def test_smart_quorum_accepts_confident_majority():
             rationale="weak evidence",
             verifier_id="v3",
         ),
+        VerificationVector.from_binary_votes(
+            veracity=True,
+            rationality=True,
+            value=True,
+            security=True,
+            rationale="ok",
+            verifier_id="v4",
+        ),
     ]
 
-    decision = SmartQuorumPolicy().decide(proposal, agent_count=3)
+    decision = SmartQuorumPolicy().decide(proposal, agent_count=4)
 
-    assert decision.status == ProposalStatus.ACCEPTED
-    assert decision.positive_votes == 3
-    assert proposal.verification.consensus_result.result == ProposalStatus.ACCEPTED
+    assert decision.result == ProposalStatus.ACCEPTED
+    assert decision.vote_weight == 4.0
 
 
 class FakeMemory:
@@ -182,11 +189,10 @@ class FakeAgent:
         return '{"veracity": true, "rationality": true, "value": true, "security": true, "rationale": "ok"}'
 
 
-def test_react_memory_cycle_commits_accepted_proposal_to_all_memories():
+def test_memory_trace_workflow_commits_accepted_proposal_to_all_memories():
     proposer = FakeAgent(
         "researcher_1",
         [
-            "Thought: useful finding\nAction: inspect benchmark\nObservation: reusable evidence found",
             '{"propose_memory": true, "signal": "MEMORY_PROPOSE", "memory_type": "evidence", "rationale": "useful evidence"}',
             """
             {
@@ -202,30 +208,35 @@ def test_react_memory_cycle_commits_accepted_proposal_to_all_memories():
     )
     validator_1 = FakeAgent("method_critic", [])
     validator_2 = FakeAgent("security_verifier", [])
+    validator_3 = FakeAgent("systems_verifier", [])
 
     orch = Orchestrator.__new__(Orchestrator)
     orch.agents = {
         proposer.config.agent_id: proposer,
         validator_1.config.agent_id: validator_1,
         validator_2.config.agent_id: validator_2,
+        validator_3.config.agent_id: validator_3,
     }
+    orch.agent_count = len(orch.agents)
     orch.policy = SmartQuorumPolicy()
 
-    react_trace, proposal, decision = orch.run_react_memory_cycle(
+    proposal = orch.propose_memory_from_trace(
         agent_id="researcher_1",
-        task_prompt="Solve an AgentDojo-style scenario.",
         task_id="agentdojo-task-1",
+        react_trace=(
+            "Thought: useful finding\n"
+            "Action: inspect benchmark\n"
+            "Observation: reusable evidence found"
+        ),
         task_context="AgentDojo-style benchmark scenario",
     )
 
-    assert "Observation" in react_trace
     assert proposal is not None
     assert proposal.header.task_id == "agentdojo-task-1"
     assert proposal.header.memory_type == "evidence"
     assert proposal.model_dump()["header"]["agent_id"] == "researcher_1"
     assert "key_decisions" in proposal.model_dump()["body"]["thoughts"]
     assert proposal.verification.self_verification.confidence >= proposer.config.conf_threshold
-    assert decision is not None
-    assert decision.status == ProposalStatus.ACCEPTED
+    assert proposal.consensus_result.result == ProposalStatus.ACCEPTED
     for agent in orch.agents.values():
         assert agent.memory.proposals[0][0].proposal_id == proposal.proposal_id

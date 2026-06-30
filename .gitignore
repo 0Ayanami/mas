@@ -2,4 +2,5 @@
 /camel_logs
 /data
 /theory_base
-/tests
+tests
+examples

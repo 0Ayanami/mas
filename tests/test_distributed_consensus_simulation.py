@@ -36,7 +36,7 @@ VerificationVector = _models.VerificationVector
 SelfVerification = _models.SelfVerification
 MultiAgentVerificationSummary = _models.MultiAgentVerificationSummary
 AgentState = _models.AgentState
-ConsensusDecision = _models.ConsensusDecision
+ConsensusResult = _models.ConsensusResult
 SmartQuorumPolicy = _consensus.SmartQuorumPolicy
 
 
@@ -142,18 +142,19 @@ class SimOrch:
         print("  [3] Consensus")
         proposal.consensus_round += 1
         d = self.policy.decide(proposal, agent_count=len(self.agents))
-        proposal.status = d.status
+        proposal.consensus_result = d
+        proposal.status = d.result
         print(
-            "      " + d.status.value + " pos=" + str(d.positive_votes)
-            + " thresh=" + str(d.threshold) + " avg_c=" + str(d.average_confidence)
+            "      " + d.result.value + " weight=" + str(d.vote_weight)
+            + "/" + str(d.total_weight)
         )
-        if d.status == ProposalStatus.ACCEPTED:
+        if d.result == ProposalStatus.ACCEPTED:
             for a in self.agents.values():
                 a.memory.add_proposal(proposal, user_id=a.agent_id)
             print("  [4] Committed to " + str(len(self.agents)) + " memories")
         mac = proposal.verification.multi_agent_verification
         for a in self.agents.values():
-            a.update_state(mac, d.status)
+            a.update_state(mac, d.result)
         print("  [5] States updated")
         if mac:
             print(
@@ -188,18 +189,18 @@ def test_unanimous():
     print("\n=== S1: Unanimous Acceptance ===")
     a = mkagents(4, 0.95, 0.05)
     d = SimOrch(a).run_round(mkprop(conf=0.9))
-    assert d.status == ProposalStatus.ACCEPTED
+    assert d.result == ProposalStatus.ACCEPTED
     for ag in a:
         assert ag.memory.memory_count() > 0
-    print("  PASS: " + d.status.value)
+    print("  PASS: " + d.result.value)
 
 
 def test_rejection():
     print("\n=== S2: Majority Rejection ===")
     a = mkagents(4, 0.30, -0.2)
     d = SimOrch(a).run_round(mkprop(conf=0.6, val=0))
-    assert d.status == ProposalStatus.REJECTED
-    print("  PASS: " + d.status.value)
+    assert d.result == ProposalStatus.REJECTED
+    print("  PASS: " + d.result.value)
 
 
 def test_mixed():
@@ -211,7 +212,7 @@ def test_mixed():
         MockAgent("s4", 0.50, -0.20, 0.7, 1.1),
     ]
     d = SimOrch(agents).run_round(mkprop(conf=0.75, s=0))
-    print("  PASS: " + d.status.value + " pos=" + str(d.positive_votes) + " thresh=" + str(d.threshold))
+    print("  PASS: " + d.result.value + " weight=" + str(d.vote_weight))
 
 
 def test_multiround():
@@ -227,7 +228,7 @@ def test_multiround():
     for title, cf, v, r, val, s, pid in rounds:
         print("\n  -- " + title + " --")
         d = o.run_round(mkprop(agent=pid, conf=cf, v=v, r=r, val=val, s=s, title=title))
-        if d.status == ProposalStatus.ACCEPTED:
+        if d.result == ProposalStatus.ACCEPTED:
             n_acc += 1
     print("\n  PASS: " + str(n_acc) + "/3 accepted")
 
