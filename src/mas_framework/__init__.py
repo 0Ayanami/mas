@@ -10,7 +10,7 @@ from mas_framework.models import (
     SelfVerification,
 )
 from mas_framework.orchestrator import Orchestrator as ResearchOrchestrator
-from mas_framework.agentdojo_adapter import AgentDojoMASPipeline
+from mas_framework.agentdojo import AgentDojoMASPipeline
 
 __all__ = [
     "AgentDojoMASPipeline",

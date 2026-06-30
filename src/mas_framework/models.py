@@ -19,22 +19,21 @@ class AgentConfig:
     role: str = ""
     system_prompt: str = ""
     conf_threshold: float = 0.7
+
+    # Model Configuration
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     model_config_dict: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0})
     model_info: dict[str, Any] | None = None
-    max_tool_iterations: int = 10
-    reflect_on_tool_use: bool = True
     model_client: Any | None = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        if self.model is None:
-            self.model = (
-                os.getenv("AUTOGEN_MODEL")
-                or os.getenv("DEFAULT_MODEL_TYPE")
-                or "gpt-4o-mini"
-            )
+    # Tool Configuration
+    max_tool_iterations: int = 10
+    reflect_on_tool_use: bool = True
+
+    def model_dump(self, mode: str = "python") -> dict[str, Any]:
+        return asdict(self)
 
 @dataclass
 class ToolCall:
