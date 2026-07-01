@@ -60,6 +60,39 @@ class AgentState:
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         return asdict(self)
 
+
+HotStuffPhase = Literal["proposal", "prepare", "pre_commit", "commit", "decide"]
+
+@dataclass(frozen=True)
+class HotStuffEvent:
+    """A compact event emitted by the in-process HotStuff-MAS consensus driver."""
+
+    event_type: str
+    phase: HotStuffPhase
+    proposal_id: str
+    view: int
+    payload: dict
+
+    def model_dump(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class HotStuffQC:
+    """Weighted quorum certificate for one HotStuff phase."""
+
+    phase: Literal["prepare", "pre_commit", "commit"]
+    proposal_id: str
+    view: int
+    voter_ids: list[str]
+    vote_weight: float
+    total_weight: float
+    threshold_weight: float
+    accepted: bool
+
+    def model_dump(self) -> dict:
+        return asdict(self)
+
 @dataclass
 class VerificationVector:
     # 四维分数

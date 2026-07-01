@@ -66,7 +66,10 @@ def load_memory_proposal_skill() -> str:
     加载记忆提案的skill
     """
     try:
-        memory_proposal_path = get_abs_path(skill_config["Memory_Proposal_Skill"])
+        memory_proposal_path = get_abs_path(
+            skill_config.get("Memory_Proposal_Skill")
+            or skill_config["memory_proposal_skill"]
+        )
     except KeyError as e:
         raise e
 

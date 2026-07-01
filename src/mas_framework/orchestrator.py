@@ -2,8 +2,7 @@
 
 from pathlib import Path
 from mas_framework.agents import AgentProtocol, create_agent
-from mas_framework.consensus import SmartQuorumPolicy
-from mas_framework.memory import Mem0MemoryBackend
+from mas_framework.consensus import EventDrivenHotStuffPolicy, SmartQuorumPolicy
 from mas_framework.models import AgentConfig, ConsensusResult, MemoryProposal, ProposalStatus
 from mas_framework.utils.loader import load_system_prompts
 from mas_framework.proposal_tools import Proposal_Tools
@@ -53,7 +52,7 @@ class Orchestrator:
             config.agent_id: create_agent(config) for config in self.agent_configs
         }
         self.agent_count = len(self.agents)
-        self.policy = policy or SmartQuorumPolicy()
+        self.policy = policy or EventDrivenHotStuffPolicy()
 
     def propose_memory_from_trace(
         self,
