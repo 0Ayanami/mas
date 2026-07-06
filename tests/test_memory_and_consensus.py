@@ -1,4 +1,4 @@
-from mas_framework.consensus import SmartQuorumPolicy
+from mas_framework.consensus import EventDrivenHotStuffPolicy, SmartQuorumPolicy
 from mas_framework.memory import Mem0MemoryBackend
 from mas_framework.models import AgentConfig, AgentState, MemoryProposal, ProposalStatus, VerificationVector
 from mas_framework.orchestrator import Orchestrator
@@ -165,6 +165,101 @@ def test_smart_quorum_accepts_confident_majority():
 
     assert decision.result == ProposalStatus.ACCEPTED
     assert decision.vote_weight == 4.0
+
+
+def test_event_driven_hotstuff_forms_three_qcs_and_excludes_proposer_vote():
+    proposal = make_proposal()
+    proposal.verifications = [
+        VerificationVector.from_binary_votes(
+            veracity=False,
+            rationality=False,
+            value=False,
+            security=False,
+            rationale="self vote should not drive consensus",
+            verifier_id="agent_a",
+        ),
+        VerificationVector.from_binary_votes(
+            veracity=True,
+            rationality=True,
+            value=True,
+            security=True,
+            rationale="ok",
+            verifier_id="v1",
+        ),
+        VerificationVector.from_binary_votes(
+            veracity=True,
+            rationality=True,
+            value=True,
+            security=True,
+            rationale="ok",
+            verifier_id="v2",
+        ),
+        VerificationVector.from_binary_votes(
+            veracity=False,
+            rationality=False,
+            value=False,
+            security=False,
+            rationale="reject",
+            verifier_id="v3",
+        ),
+    ]
+
+    decision = EventDrivenHotStuffPolicy().decide(proposal, agent_count=4)
+
+    assert decision.result == ProposalStatus.ACCEPTED
+    assert decision.voting_agents == 3
+    assert decision.vote_weight == 2.0
+    assert [qc["phase"] for qc in proposal.hotstuff_qcs] == ["prepare", "pre_commit", "commit"]
+    assert all(qc["accepted"] for qc in proposal.hotstuff_qcs)
+    assert proposal.hotstuff_events[0]["event_type"] == "proposal"
+    assert proposal.hotstuff_events[-1]["event_type"] == "decide"
+
+
+def test_event_driven_hotstuff_rejects_when_prepare_qc_is_missing():
+    proposal = make_proposal()
+    proposal.verifications = [
+        VerificationVector.from_binary_votes(
+            veracity=True,
+            rationality=True,
+            value=True,
+            security=True,
+            rationale="ok",
+            verifier_id="v1",
+        ),
+        VerificationVector.from_binary_votes(
+            veracity=False,
+            rationality=False,
+            value=False,
+            security=False,
+            rationale="reject",
+            verifier_id="v2",
+        ),
+        VerificationVector.from_binary_votes(
+            veracity=False,
+            rationality=False,
+            value=False,
+            security=False,
+            rationale="reject",
+            verifier_id="v3",
+        ),
+    ]
+
+    decision = EventDrivenHotStuffPolicy().decide(proposal, agent_count=4)
+
+    assert decision.result == ProposalStatus.REJECTED
+    assert len(proposal.hotstuff_qcs) == 1
+    assert proposal.hotstuff_qcs[0]["phase"] == "prepare"
+    assert proposal.hotstuff_qcs[0]["accepted"] is False
+
+
+def test_orchestrator_uses_event_driven_hotstuff_by_default(monkeypatch):
+    import mas_framework.orchestrator as orchestrator_module
+
+    monkeypatch.setattr(orchestrator_module, "create_agent", lambda config: None)
+
+    orch = Orchestrator(agent_configs=[AgentConfig(agent_id="agent_a")])
+
+    assert orch.policy.__class__.__name__ == "EventDrivenHotStuffPolicy"
 
 
 class FakeMemory:
