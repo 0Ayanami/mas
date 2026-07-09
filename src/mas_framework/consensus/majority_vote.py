@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional, Sequence
 
-from models import (
+from mas_framework.consensus.models import (
     ConsensusDecision,
     ConsensusVote,
     MemoryProposal,

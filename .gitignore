@@ -5,3 +5,8 @@
 tests
 examples
 .env
+__pycache__/
+*.pyc
+.agents/
+.pytest_cache/
+src/mas_framework/__pycache__/

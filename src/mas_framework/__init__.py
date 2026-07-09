@@ -1,25 +1,22 @@
-﻿"""Consensus-memory multi-agent research framework."""
+"""Consensus-memory multi-agent research framework."""
 
-from mas_framework.models import (
-    AgentConfig,
-    ConsensusResult,
-    MemoryProposal,
-    ProposalStatus,
-    VerificationVector,
-    AgentState,
-    SelfVerification,
+from mas_framework.consensus import (
+    AgentWeightState,
+    AutoGenProposalEvaluator,
+    MajorityVoteConsensus,
+    SmartQuorumConsensus,
+    VerificationEngine,
 )
-from mas_framework.orchestrator import Orchestrator as ResearchOrchestrator
-from mas_framework.agentdojo import AgentDojoMASPipeline
+from mas_framework.common import AgentConfig
+from mas_framework.tamas_workflow import TAMASAutoGenRunner, TAMASRunConfig
 
 __all__ = [
-    "AgentDojoMASPipeline",
     "AgentConfig",
-    "AgentState",
-    "ConsensusResult",
-    "MemoryProposal",
-    "ProposalStatus",
-    "ResearchOrchestrator",
-    "SelfVerification",
-    "VerificationVector",
+    "AgentWeightState",
+    "AutoGenProposalEvaluator",
+    "MajorityVoteConsensus",
+    "SmartQuorumConsensus",
+    "TAMASAutoGenRunner",
+    "TAMASRunConfig",
+    "VerificationEngine",
 ]

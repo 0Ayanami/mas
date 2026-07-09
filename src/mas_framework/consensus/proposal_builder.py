@@ -6,7 +6,7 @@ import hashlib
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Union
 
-from models import (
+from mas_framework.consensus.models import (
     KeyDecision,
     MemoryProposal,
     MemoryProposalBody,

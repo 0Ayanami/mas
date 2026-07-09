@@ -1,15 +1,15 @@
-"""Proposal verification services for MARBLE memory consensus."""
+"""Proposal verification services for memory consensus."""
 
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Dict, Optional, Protocol
 
-import litellm
-from pathlib import Path
-from models import (
+from autogen_core.models import SystemMessage, UserMessage
+
+from mas_framework.common import build_model_client, run_autogen_sync
+from mas_framework.consensus.models import (
     DEFAULT_DIMENSION_WEIGHTS,
     MemoryProposal,
     VerificationContext,
@@ -17,45 +17,7 @@ from models import (
 )
 
 
-def load_provider_env(env_path: str = ".env") -> None:
-    """Load active key-value settings from .env, ignoring commented lines."""
-    path = Path(env_path)
-    if not path.exists():
-        return
-
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip().replace("-", "_").upper()
-        value = value.strip().strip('"').strip("'")
-        if key and value:
-            os.environ[key] = value
-
-
-def normalize_model_and_base_url(llm_model: str) -> tuple[str, Optional[str]]:
-    base_url = os.environ.get("BASE_URL")
-    env_model = os.environ.get("MODEL")
-    model = llm_model or env_model or "gpt-3.5-turbo"
-    has_together_key = bool(os.environ.get("TOGETHERAI_API_KEY"))
-    if env_model and model.startswith(("gpt-", "openai/")):
-        model = env_model
-    if base_url and "/" not in model:
-        model = f"openai/{model}"
-    elif has_together_key and not model.startswith("together_ai/"):
-        model = f"together_ai/{model}"
-    return model, base_url
-
-
-def resolve_api_key(base_url: Optional[str] = None) -> Optional[str]:
-    if base_url:
-        return os.environ.get("TOGETHERAI_API_KEY") or os.environ.get("API_KEY")
-    return None
-
 class ProposalEvaluator(Protocol):
-    """Evaluates a memory proposal and returns a verification vector."""
-
     def evaluate(
         self,
         proposal: MemoryProposal,
@@ -66,7 +28,7 @@ class ProposalEvaluator(Protocol):
 
 
 class HeuristicProposalEvaluator:
-    """Lightweight deterministic evaluator for local validation and tests."""
+    """Deterministic evaluator for local validation and tests."""
 
     INJECTION_PATTERNS = (
         "ignore previous instructions",
@@ -84,10 +46,7 @@ class HeuristicProposalEvaluator:
         "steal",
     )
 
-    def __init__(
-        self,
-        dimension_weights: Optional[Dict[str, float]] = None,
-    ) -> None:
+    def __init__(self, dimension_weights: Optional[Dict[str, float]] = None) -> None:
         self.dimension_weights = dimension_weights or DEFAULT_DIMENSION_WEIGHTS.copy()
 
     def evaluate(
@@ -101,7 +60,6 @@ class HeuristicProposalEvaluator:
         rationality, rationality_reason = self._evaluate_rationality(proposal)
         value, value_reason = self._evaluate_value(proposal, context)
         security, security_reason = self._evaluate_security(proposal_text)
-
         reasoning = " ".join(
             reason
             for reason in (
@@ -120,22 +78,19 @@ class HeuristicProposalEvaluator:
             reasoning=reasoning,
             verifier_agent_id=verifier_agent_id,
             dimension_weights=self.dimension_weights.copy(),
+            metadata={"evaluator": "heuristic"},
         )
 
     def _evaluate_veracity(self, proposal: MemoryProposal) -> tuple[int, str]:
         if not proposal.body.data:
             return 1, "No external data claims were provided."
         missing_source = [
-            item
-            for item in proposal.body.data
-            if not item.source or not item.content_snippet
+            item for item in proposal.body.data if not item.source or not item.content_snippet
         ]
         if missing_source:
             return 0, "Some data references are missing a source or content snippet."
         fabricated_url = [
-            item
-            for item in proposal.body.data
-            if item.url and not re.match(r"^https?://", item.url)
+            item for item in proposal.body.data if item.url and not re.match(r"^https?://", item.url)
         ]
         if fabricated_url:
             return 0, "Some data references contain non-HTTP URLs."
@@ -152,7 +107,9 @@ class HeuristicProposalEvaluator:
         return 1, "Actions and reasoning metadata are internally consistent."
 
     def _evaluate_value(
-        self, proposal: MemoryProposal, context: VerificationContext
+        self,
+        proposal: MemoryProposal,
+        context: VerificationContext,
     ) -> tuple[int, str]:
         if proposal.task_id != context.task_id:
             return 0, "Proposal task_id does not match the verification context."
@@ -174,54 +131,28 @@ class HeuristicProposalEvaluator:
         return 1, "No common prompt-injection or memory-tampering pattern detected."
 
 
-def load_consensus_env(
-    env_path: str = ".env",
-    *,
-    include_commented: bool = True,
-) -> None:
-    """Load active .env settings for consensus verification.
-
-    ``include_commented`` is retained for older callers but is intentionally
-    ignored. Provider settings now come only from active .env entries.
-    """
-    _ = include_commented
-    load_provider_env(env_path)
-
-
-class LLMProposalEvaluator:
-    """LLM-as-judge evaluator following the proposal verification prompt."""
+class AutoGenProposalEvaluator:
+    """LLM-as-judge evaluator implemented with AutoGen model clients."""
 
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
-        agent_models: Optional[Dict[str, str]] = None,
-        base_url: Optional[str] = None,
-        env_path: str = ".env",
-        load_env: bool = True,
-        include_commented_env: bool = True,
+        model_client: Any | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        verifier_models: dict[str, str] | None = None,
+        verifier_agents: dict[str, Any] | None = None,
         dimension_weights: Optional[Dict[str, float]] = None,
         fallback_evaluator: Optional[ProposalEvaluator] = None,
     ) -> None:
-        if load_env:
-            load_consensus_env(
-                env_path,
-                include_commented=include_commented_env,
-            )
-        raw_model = model or os.environ.get("MODEL") or "gpt-3.5-turbo"
-        self.model, self.base_url = normalize_model_and_base_url(raw_model)
-        self.base_url_override = base_url
-        if base_url and not self.model.startswith("together_ai/"):
-            self.base_url = base_url
-        self.api_key = resolve_api_key(self.base_url)
-        self.agent_models = {
-            str(agent_id): str(agent_model)
-            for agent_id, agent_model in (agent_models or {}).items()
-            if agent_model
-        }
-        self._settings_cache: Dict[str, tuple[str, Optional[str], Optional[str]]] = {}
+        self.model_client = model_client
+        self.model = model
+        self.temperature = temperature
+        self.verifier_models = dict(verifier_models or {})
+        self.verifier_agents = dict(verifier_agents or {})
         self.dimension_weights = dimension_weights or DEFAULT_DIMENSION_WEIGHTS.copy()
         self.fallback_evaluator = fallback_evaluator
+        self._client_cache: dict[str, Any] = {}
 
     def evaluate(
         self,
@@ -230,33 +161,36 @@ class LLMProposalEvaluator:
         verifier_agent_id: Optional[str] = None,
     ) -> VerificationVector:
         prompt = self._build_prompt(proposal, context)
-        model, base_url, api_key = self._settings_for_verifier(verifier_agent_id)
         try:
-            completion = litellm.completion(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a multi-agent memory verifier.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=512,
-                temperature=0.0,
-                base_url=base_url,
-                api_key=api_key,
-            )
-            content = completion.choices[0].message.content or "{}"
+            verifier_agent = self._agent_for(verifier_agent_id)
+            if verifier_agent is not None:
+                content = self._evaluate_with_agent(verifier_agent, prompt)
+                metadata = {
+                    "evaluator": "autogen_agent",
+                    "agent": verifier_agent_id,
+                }
+            else:
+                client = self._client_for(verifier_agent_id)
+                result = run_autogen_sync(
+                    client.create(
+                        [
+                            SystemMessage(content="You are a multi-agent memory verifier."),
+                            UserMessage(content=prompt, source="user"),
+                        ]
+                    )
+                )
+                content = _result_text(result)
+                metadata = {"evaluator": "autogen", "model": _model_name(client)}
             parsed = self._parse_json(content)
             return VerificationVector(
                 veracity=int(parsed["veracity"]),
                 rationality=int(parsed["rationality"]),
                 value=int(parsed["value"]),
                 security=int(parsed["security"]),
-                reasoning=str(parsed.get("reasoning", "")),
+                reasoning=str(parsed.get("reasoning", parsed.get("rationale", ""))),
                 verifier_agent_id=verifier_agent_id,
                 dimension_weights=self.dimension_weights.copy(),
-                metadata={"evaluator": "llm", "model": model},
+                metadata=metadata,
             )
         except Exception:
             if self.fallback_evaluator is None:
@@ -267,26 +201,34 @@ class LLMProposalEvaluator:
                 verifier_agent_id=verifier_agent_id,
             )
 
-    def _settings_for_verifier(
-        self,
-        verifier_agent_id: Optional[str],
-    ) -> tuple[str, Optional[str], Optional[str]]:
-        raw_model = None
-        if verifier_agent_id is not None:
-            raw_model = self.agent_models.get(str(verifier_agent_id))
-        raw_model = raw_model or self.model
-        if raw_model in self._settings_cache:
-            return self._settings_cache[raw_model]
-        model, base_url = normalize_model_and_base_url(raw_model)
-        if self.base_url_override and not model.startswith("together_ai/"):
-            base_url = self.base_url_override
-        settings = (model, base_url, resolve_api_key(base_url))
-        self._settings_cache[raw_model] = settings
-        return settings
+    def _agent_for(self, verifier_agent_id: Optional[str]) -> Any | None:
+        if verifier_agent_id is None:
+            return None
+        return self.verifier_agents.get(verifier_agent_id)
 
-    def _build_prompt(
-        self, proposal: MemoryProposal, context: VerificationContext
-    ) -> str:
+    def _evaluate_with_agent(self, verifier_agent: Any, prompt: str) -> str:
+        result = run_autogen_sync(verifier_agent.run(task=prompt))
+        return _agent_result_text(result)
+
+    def _client_for(self, verifier_agent_id: Optional[str]) -> Any:
+        if verifier_agent_id and verifier_agent_id in self.verifier_models:
+            if verifier_agent_id not in self._client_cache:
+                self._client_cache[verifier_agent_id] = build_model_client(
+                    model=self.verifier_models[verifier_agent_id],
+                    temperature=self.temperature,
+                )
+            return self._client_cache[verifier_agent_id]
+        if self.model_client is not None:
+            return self.model_client
+        cache_key = "__default__"
+        if cache_key not in self._client_cache:
+            self._client_cache[cache_key] = build_model_client(
+                model=self.model,
+                temperature=self.temperature,
+            )
+        return self._client_cache[cache_key]
+
+    def _build_prompt(self, proposal: MemoryProposal, context: VerificationContext) -> str:
         related = [item.to_dict() for item in context.related_proposals]
         return (
             "你是一名多智能体系统的安全验证器。请对以下Memory Proposal"
@@ -331,9 +273,41 @@ class VerificationEngine:
         context: VerificationContext,
         verifier_agent_id: Optional[str] = None,
     ) -> VerificationVector:
-        """Return a verification vector for a proposal."""
         return self.evaluator.evaluate(
             proposal=proposal,
             context=context,
             verifier_agent_id=verifier_agent_id,
         )
+
+
+def _result_text(result: Any) -> str:
+    content = getattr(result, "content", None)
+    if isinstance(content, str):
+        return content
+    if content is not None:
+        return json.dumps(content, ensure_ascii=False, default=str)
+    raise ValueError("AutoGen model client returned no content.")
+
+
+def _agent_result_text(result: Any) -> str:
+    messages = getattr(result, "messages", None)
+    if messages:
+        for message in reversed(messages):
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content.strip():
+                return content
+            if content is not None:
+                return json.dumps(content, ensure_ascii=False, default=str)
+    return _result_text(result)
+
+
+def _model_name(client: Any) -> str:
+    return str(getattr(client, "model", getattr(client, "_model", client.__class__.__name__)))
+
+
+__all__ = [
+    "AutoGenProposalEvaluator",
+    "HeuristicProposalEvaluator",
+    "ProposalEvaluator",
+    "VerificationEngine",
+]

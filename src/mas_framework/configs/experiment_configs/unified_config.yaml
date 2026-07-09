@@ -5,42 +5,43 @@ experiment:
   log_level: INFO
 
 agents:
-  total: 5
   model: qwen3.7-max-preview
+  capability_coefficient: 8.96
   models:
     honest: qwen3.7-max-preview
     byzantine: qwen3-max-preview
-  capability_coefficient: 8.96
   model_capability_coefficients:
     qwen3.7-max-preview: 8.96
     qwen3-max-preview: 8.4
-  num_byzantine: 0
+  temperature: 0.0
 
 collaboration:
-  mode: role_based
-  rounds: 1
+  mode: magentic_one
+  rounds: 50
   max_tokens: 384
-  temperature: 0.0
   options:
     use_agent_act: true
 
-consensus:
-  enabled: true
-
 proposal:
+  enabled: true
   builder_enabled: true
   verification_enabled: true
   weight_manager_enabled: true
-  max_rounds: 1
-  include_proposer_as_verifier: false
   verification:
     type: llm
-    fallback_to_heuristic: true
+    include_proposer_as_verifier: false
+    dimension_weights: {
+      "veracity": 0.35,
+      "rationality": 0.20,
+      "value": 0.20,
+      "security": 0.25,
+    }
   consensus:
     strategy: smart_quorum
     confidence_threshold: 0.6
     majority_threshold: 0.5
-    epsilon_ratio: 1
+    strict_majority: true
+    epsilon_ratio: 0.1
     epsilon: null
     use_dynamic_estimate: false
   weight_manager:
@@ -52,14 +53,14 @@ proposal:
     vote_window: 30
     initial_vc: 0.5
     initial_hc: 0.5
-  fisher_ida:
+  fisher_lda:
     enabled: false
     alpha_initial: 0.6
     beta_initial: 0.4
     M: 1
 
 memory:
-  inject_shared_memory: true
+  user_prefix: tamas
 
 benchmark:
   type: multiagentbench

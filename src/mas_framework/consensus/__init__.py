@@ -1,7 +1,5 @@
-"""Consensus-memory infrastructure for MARBLE."""
-
-from marble.memory.consensus_memory import ConsensusMemory
-from marble.consensus.models import (
+from mas_framework.consensus.majority_vote import MajorityVoteConsensus
+from mas_framework.consensus.models import (
     DEFAULT_DIMENSION_WEIGHTS,
     VERIFICATION_DIMENSIONS,
     ConsensusDecision,
@@ -21,74 +19,51 @@ from marble.consensus.models import (
     VerificationContext,
     VerificationVector,
 )
-from marble.consensus.majority_vote import MajorityVoteConsensus
-from marble.consensus.fisher_lda import (
-    FisherLDAResult,
-    FisherLDASample,
-    fit_fisher_lda_quality_weights,
-)
-from marble.consensus.smart_quorum import SmartQuorumConsensus
-from marble.consensus.layer import (
-    AgentActivityTracker,
-    ConsensusLayer,
-    ProposalSubmission,
-)
-from marble.consensus.proposal_builder import (
-    HashSignatureProvider,
-    ProposalBuilder,
-    SignatureProvider,
-)
-from marble.consensus.verification_engine import (
+from mas_framework.consensus.proposal_builder import HashSignatureProvider, ProposalBuilder, SignatureProvider
+from mas_framework.consensus.smart_quorum import SmartQuorumConsensus
+from mas_framework.consensus.verification_engine import (
+    AutoGenProposalEvaluator,
     HeuristicProposalEvaluator,
-    LLMProposalEvaluator,
     ProposalEvaluator,
     VerificationEngine,
-    load_consensus_env,
 )
-from marble.consensus.weight_manager import AgentWeightState, WeightManager
-from marble.consensus.workflow import (
-    ConsensusWorkflowResult,
-    MemoryConsensusWorkflow,
-)
+from mas_framework.consensus.weight_manager import AgentWeightState, WeightManager
+
+MajorityVotePolicy = MajorityVoteConsensus
+SmartQuorumPolicy = SmartQuorumConsensus
+WeightedQuorumPolicy = SmartQuorumConsensus
 
 __all__ = [
     "AgentWeightState",
-    "AgentActivityTracker",
-    "ConsensusMemory",
+    "AutoGenProposalEvaluator",
     "ConsensusDecision",
-    "ConsensusLayer",
     "ConsensusResult",
     "ConsensusVote",
-    "ConsensusWorkflowResult",
     "DEFAULT_DIMENSION_WEIGHTS",
-    "FisherLDAResult",
-    "FisherLDASample",
     "HashSignatureProvider",
     "HeuristicProposalEvaluator",
     "KeyDecision",
-    "LLMProposalEvaluator",
+    "MajorityVoteConsensus",
+    "MajorityVotePolicy",
     "MemoryProposal",
     "MemoryProposalBody",
     "MemoryProposalHeader",
     "MultiVerificationSummary",
-    "MajorityVoteConsensus",
-    "MemoryConsensusWorkflow",
     "ProposalAction",
     "ProposalBuilder",
     "ProposalDataReference",
     "ProposalEvaluator",
     "ProposalObservation",
-    "ProposalSubmission",
     "ProposalThoughts",
     "ProposalVerification",
     "SelfVerificationScores",
     "SignatureProvider",
     "SmartQuorumConsensus",
+    "SmartQuorumPolicy",
     "VERIFICATION_DIMENSIONS",
     "VerificationContext",
     "VerificationEngine",
     "VerificationVector",
     "WeightManager",
-    "fit_fisher_lda_quality_weights",
-    "load_consensus_env",
+    "WeightedQuorumPolicy",
 ]

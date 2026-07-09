@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Set
 
-from majority_vote import MajorityVoteConsensus
-from models import (
+from mas_framework.consensus.majority_vote import MajorityVoteConsensus
+from mas_framework.consensus.models import (
     ConsensusDecision,
     ConsensusVote,
     MemoryProposal,
@@ -27,7 +27,8 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         epsilon_ratio: float = 0.1,
         epsilon: Optional[float] = None,
         use_dynamic_estimate: bool = False,
-        fisher_ida: Optional[Mapping[str, object]] = None,
+        
+        fisher_lda: Optional[Mapping[str, object]] = None,
         alpha_initial: float = 0.6,
         beta_initial: float = 0.4,
 
@@ -61,7 +62,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         self.epsilon_ratio = float(epsilon_ratio)
         self.epsilon = None if epsilon is None else float(epsilon)
         self.use_dynamic_estimate = use_dynamic_estimate
-        self.fisher_ida = dict(fisher_ida or {})
+        self.fisher_ida = dict(fisher_lda or {})
         self.alpha_initial = float(alpha_initial)
         self.beta_initial = float(beta_initial)
 

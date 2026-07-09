@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Union
 
-from fisher_lda import (
+from mas_framework.consensus.fisher_lda import (
     FisherLDAResult,
     RawSample,
     fit_fisher_lda_quality_weights,

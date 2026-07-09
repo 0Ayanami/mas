@@ -1,337 +1,223 @@
-from mas_framework.consensus import EventDrivenHotStuffPolicy, SmartQuorumPolicy
-from mas_framework.memory import Mem0MemoryBackend
-from mas_framework.models import AgentConfig, AgentState, MemoryProposal, ProposalStatus, VerificationVector
-from mas_framework.orchestrator import Orchestrator
+from autogen_ext.models.replay import ReplayChatCompletionClient
+
+from mas_framework.consensus import (
+    AutoGenProposalEvaluator,
+    MajorityVoteConsensus,
+    ProposalBuilder,
+    SmartQuorumConsensus,
+    VerificationContext,
+)
+from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
+from mas_framework.tamas_workflow import TAMASAutoGenRunner, TAMASRunConfig, TAMASToolLoader
 
 
-def make_proposal() -> MemoryProposal:
-    return MemoryProposal(
-        agent_id="agent_a",
-        task_id="task",
-        memory_type="research_note",
-        title="Consensus memory proposal",
-        thoughts_decision="Use proposal verification before memory sync.",
-        action="Summarized document",
-        data={"evidence": "research note"},
-        results_observation="The proposal captures a useful milestone for consensus memory.",
-        self_confidence=0.8,
-    )
-
-
-class FakeMem0Client:
+class FakeMem0:
     def __init__(self):
-        self.added = []
-        self.updated = []
+        self.items = []
 
     def add(self, messages, **kwargs):
-        memory_id = f"mem-{len(self.added) + 1}"
-        self.added.append({"id": memory_id, "messages": messages, "kwargs": kwargs})
-        return {"results": [{"id": memory_id}]}
+        self.items.append({"messages": messages, "kwargs": kwargs})
+        return {"results": [{"id": f"mem-{len(self.items)}"}]}
 
     def search(self, query, **kwargs):
         return {
             "results": [
                 {
-                    "id": item["id"],
                     "memory": item["messages"][0]["content"],
                     "metadata": item["kwargs"].get("metadata", {}),
                 }
-                for item in self.added
+                for item in self.items
                 if query.lower() in item["messages"][0]["content"].lower()
             ]
         }
 
-    def update(self, memory_id, **kwargs):
-        self.updated.append({"id": memory_id, "kwargs": kwargs})
-        return {"id": memory_id, "event": "UPDATE"}
 
+class FakeVerificationAgent:
+    name = "verifier_agent"
 
-def test_mem0_backend_add_search_update_proposal():
-    client = FakeMem0Client()
-    backend = Mem0MemoryBackend(client=client, default_user_id="shared")
-    proposal = make_proposal()
-
-    result = backend.add_proposal(proposal, user_id="agent_a")
-    assert result["results"][0]["id"] == "mem-1"
-    assert client.added[0]["kwargs"]["user_id"] == "agent_a"
-    assert client.added[0]["kwargs"]["metadata"]["proposal_id"] == proposal.proposal_id
-
-    hits = backend.search("Consensus", user_id="agent_a")
-    assert hits[0]["metadata"]["task_id"] == "task"
-
-    updated = backend.update_proposal("mem-1", proposal, user_id="agent_a")
-    assert updated["event"] == "UPDATE"
-    assert client.updated[0]["kwargs"]["metadata"]["proposal_id"] == proposal.proposal_id
-
-
-def test_memory_proposal_dump_uses_restructured_header_body_names():
-    proposal = MemoryProposal(
-        header={
-            "proposal_id": "550e8400-e29b-41d4-a716-446655440000",
-            "task_id": "task_20250601_001",
-            "timestamp": "2026-06-08T14:30:00.000Z",
-            "agent_id": "agent_001",
-            "agent_signature": "SHA256_RSA_SIG_BASE64",
-            "parent_proposals": ["550e8400-...-0001", "550e8400-...-0002"],
-            "body_hash": "will-be-overwritten",
-            "proposal_summary": "通过Python requests库获取天气API数据，解析JSON返回温度信息",
-        },
-        body={
-            "thoughts": {
-                "thoughts_abstract": "用户需要查询北京今日天气，决定调用公开天气API获取实时数据",
-                "key_decisions": [
-                    {"decision": "选择OpenWeatherMap作为数据源", "result": "adopted"},
-                    {"decision": "使用GET请求而非POST", "result": "adopted"},
-                ],
-            },
-            "actions": [
-                {
-                    "action_id": "act_1",
-                    "type": "api_call",
-                    "tool": "http_requests",
-                    "params": {
-                        "url": "https://api.weather.com/v1/current?city=Beijing",
-                        "method": "GET",
-                    },
-                    "status": "success",
-                }
-            ],
-            "data": [
-                {
-                    "source": "weather_api",
-                    "content_snippet": "北京今日气温25°C，晴，湿度45%",
-                    "url": "https://api.weather.com/v1/current?city=Beijing",
-                    "timestamp": "2026-06-08T14:30:00.000Z",
-                }
-            ],
-            "observations": [
-                {
-                    "type": "data_retrieval",
-                    "description": "成功获取天气数据并解析JSON",
-                    "status": "complete",
-                }
-            ],
-        },
-    )
-
-    dumped = proposal.model_dump()
-    assert dumped["header"]["agent_id"] == "agent_001"
-    assert dumped["header"]["agent_signature"] == "SHA256_RSA_SIG_BASE64"
-    assert dumped["header"]["parent_proposals"] == ["550e8400-...-0001", "550e8400-...-0002"]
-    assert "proposing_agent_id" not in dumped["header"]
-    assert "parent_proposal_ids" not in dumped["header"]
-    assert dumped["body"]["thoughts"]["key_decisions"][0]["result"] == "adopted"
-    assert dumped["body"]["data"][0]["content_snippet"] == "北京今日气温25°C，晴，湿度45%"
-
-
-def test_smart_quorum_accepts_confident_majority():
-    proposal = make_proposal()
-    proposal.verifications = [
-        VerificationVector.from_binary_votes(
-            veracity=True,
-            rationality=True,
-            value=True,
-            security=True,
-            rationale="ok",
-            verifier_id="v1",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=True,
-            rationality=True,
-            value=True,
-            security=True,
-            rationale="ok",
-            verifier_id="v2",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=False,
-            rationality=True,
-            value=True,
-            security=True,
-            rationale="weak evidence",
-            verifier_id="v3",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=True,
-            rationality=True,
-            value=True,
-            security=True,
-            rationale="ok",
-            verifier_id="v4",
-        ),
-    ]
-
-    decision = SmartQuorumPolicy().decide(proposal, agent_count=4)
-
-    assert decision.result == ProposalStatus.ACCEPTED
-    assert decision.vote_weight == 4.0
-
-
-def test_event_driven_hotstuff_forms_three_qcs_and_excludes_proposer_vote():
-    proposal = make_proposal()
-    proposal.verifications = [
-        VerificationVector.from_binary_votes(
-            veracity=False,
-            rationality=False,
-            value=False,
-            security=False,
-            rationale="self vote should not drive consensus",
-            verifier_id="agent_a",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=True,
-            rationality=True,
-            value=True,
-            security=True,
-            rationale="ok",
-            verifier_id="v1",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=True,
-            rationality=True,
-            value=True,
-            security=True,
-            rationale="ok",
-            verifier_id="v2",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=False,
-            rationality=False,
-            value=False,
-            security=False,
-            rationale="reject",
-            verifier_id="v3",
-        ),
-    ]
-
-    decision = EventDrivenHotStuffPolicy().decide(proposal, agent_count=4)
-
-    assert decision.result == ProposalStatus.ACCEPTED
-    assert decision.voting_agents == 3
-    assert decision.vote_weight == 2.0
-    assert [qc["phase"] for qc in proposal.hotstuff_qcs] == ["prepare", "pre_commit", "commit"]
-    assert all(qc["accepted"] for qc in proposal.hotstuff_qcs)
-    assert proposal.hotstuff_events[0]["event_type"] == "proposal"
-    assert proposal.hotstuff_events[-1]["event_type"] == "decide"
-
-
-def test_event_driven_hotstuff_rejects_when_prepare_qc_is_missing():
-    proposal = make_proposal()
-    proposal.verifications = [
-        VerificationVector.from_binary_votes(
-            veracity=True,
-            rationality=True,
-            value=True,
-            security=True,
-            rationale="ok",
-            verifier_id="v1",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=False,
-            rationality=False,
-            value=False,
-            security=False,
-            rationale="reject",
-            verifier_id="v2",
-        ),
-        VerificationVector.from_binary_votes(
-            veracity=False,
-            rationality=False,
-            value=False,
-            security=False,
-            rationale="reject",
-            verifier_id="v3",
-        ),
-    ]
-
-    decision = EventDrivenHotStuffPolicy().decide(proposal, agent_count=4)
-
-    assert decision.result == ProposalStatus.REJECTED
-    assert len(proposal.hotstuff_qcs) == 1
-    assert proposal.hotstuff_qcs[0]["phase"] == "prepare"
-    assert proposal.hotstuff_qcs[0]["accepted"] is False
-
-
-def test_orchestrator_uses_event_driven_hotstuff_by_default(monkeypatch):
-    import mas_framework.orchestrator as orchestrator_module
-
-    monkeypatch.setattr(orchestrator_module, "create_agent", lambda config: None)
-
-    orch = Orchestrator(agent_configs=[AgentConfig(agent_id="agent_a")])
-
-    assert orch.policy.__class__.__name__ == "EventDrivenHotStuffPolicy"
-
-
-class FakeMemory:
     def __init__(self):
-        self.proposals = []
+        self.tasks = []
 
-    def add_proposal(self, proposal, user_id):
-        self.proposals.append((proposal, user_id))
-        return {"ok": True}
+    async def run(self, task):
+        self.tasks.append(task)
+
+        class Result:
+            messages = [
+                type(
+                    "Message",
+                    (),
+                    {
+                        "content": (
+                            '{"veracity":1,"rationality":1,"value":1,'
+                            '"security":1,"reasoning":"agent ok"}'
+                        )
+                    },
+                )()
+            ]
+
+        return Result()
 
 
-class FakeAgent:
-    def __init__(self, agent_id, responses):
-        self.config = AgentConfig(agent_id=agent_id, role=agent_id, system_prompt="")
-        self.state = AgentState()
-        self.memory = FakeMemory()
-        self._responses = list(responses)
-
-    def run(self, prompt):
-        if self._responses:
-            return self._responses.pop(0)
-        return '{"veracity": true, "rationality": true, "value": true, "security": true, "rationale": "ok"}'
-
-
-def test_memory_trace_workflow_commits_accepted_proposal_to_all_memories():
-    proposer = FakeAgent(
-        "researcher_1",
-        [
-            '{"propose_memory": true, "signal": "MEMORY_PROPOSE", "memory_type": "evidence", "rationale": "useful evidence"}',
-            """
-            {
-              "proposal_summary": "Reusable benchmark evidence was found.",
-              "thoughts": {"thoughts_abstract": "The benchmark evidence is relevant.", "key_decisions": []},
-              "actions": [{"action_id": "act_1", "type": "tool_call", "tool": "benchmark", "params": {}, "status": "success"}],
-              "data": [{"source": "benchmark", "content_snippet": "reusable evidence", "url": "", "timestamp": ""}],
-              "observations": [{"type": "task_progress", "description": "evidence can support other agents", "status": "complete"}]
-            }
-            """,
-            '{"veracity": true, "rationality": true, "value": true, "security": true, "rationale": "self ok"}',
-        ],
-    )
-    validator_1 = FakeAgent("method_critic", [])
-    validator_2 = FakeAgent("security_verifier", [])
-    validator_3 = FakeAgent("systems_verifier", [])
-
-    orch = Orchestrator.__new__(Orchestrator)
-    orch.agents = {
-        proposer.config.agent_id: proposer,
-        validator_1.config.agent_id: validator_1,
-        validator_2.config.agent_id: validator_2,
-        validator_3.config.agent_id: validator_3,
+def model_info():
+    return {
+        "vision": False,
+        "function_calling": True,
+        "json_output": True,
+        "family": "unknown",
+        "structured_output": True,
     }
-    orch.agent_count = len(orch.agents)
-    orch.policy = SmartQuorumPolicy()
 
-    proposal = orch.propose_memory_from_trace(
-        agent_id="researcher_1",
-        task_id="agentdojo-task-1",
-        react_trace=(
-            "Thought: useful finding\n"
-            "Action: inspect benchmark\n"
-            "Observation: reusable evidence found"
-        ),
-        task_context="AgentDojo-style benchmark scenario",
+
+def test_autogen_verification_engine_uses_replay_model_client():
+    proposal = ProposalBuilder().from_agent_output(
+        task_id="task-1",
+        agent_id="agent_a",
+        output={
+            "observations": [{"type": "note", "description": "Useful memory"}],
+            "proposal_summary": "Useful memory",
+        },
+    )
+    evaluator = AutoGenProposalEvaluator(
+        model_client=ReplayChatCompletionClient(
+            ['{"veracity":1,"rationality":1,"value":1,"security":1,"reasoning":"ok"}']
+        )
     )
 
-    assert proposal is not None
-    assert proposal.header.task_id == "agentdojo-task-1"
-    assert proposal.header.memory_type == "evidence"
-    assert proposal.model_dump()["header"]["agent_id"] == "researcher_1"
-    assert "key_decisions" in proposal.model_dump()["body"]["thoughts"]
-    assert proposal.verification.self_verification.confidence >= proposer.config.conf_threshold
-    assert proposal.consensus_result.result == ProposalStatus.ACCEPTED
-    for agent in orch.agents.values():
-        assert agent.memory.proposals[0][0].proposal_id == proposal.proposal_id
+    vector = evaluator.evaluate(
+        proposal,
+        VerificationContext(task_id="task-1"),
+        verifier_agent_id="verifier",
+    )
+
+    assert vector.confidence_score == 1.0
+    assert vector.metadata["evaluator"] == "autogen"
+
+
+def test_autogen_verification_engine_uses_verifier_agent_when_available():
+    proposal = ProposalBuilder().from_agent_output(
+        task_id="task-1",
+        agent_id="agent_a",
+        output={
+            "observations": [{"type": "note", "description": "Useful memory"}],
+            "proposal_summary": "Useful memory",
+        },
+    )
+    verifier = FakeVerificationAgent()
+    evaluator = AutoGenProposalEvaluator(verifier_agents={verifier.name: verifier})
+
+    vector = evaluator.evaluate(
+        proposal,
+        VerificationContext(task_id="task-1"),
+        verifier_agent_id=verifier.name,
+    )
+
+    assert verifier.tasks
+    assert vector.confidence_score == 1.0
+    assert vector.metadata["evaluator"] == "autogen_agent"
+    assert vector.metadata["agent"] == verifier.name
+
+
+def test_majority_and_smart_quorum_decisions():
+    builder = ProposalBuilder()
+    proposal = builder.from_agent_output(
+        task_id="task-1",
+        agent_id="agent_a",
+        output={"observations": ["A useful result"], "proposal_summary": "A useful result"},
+    )
+    context = VerificationContext(task_id="task-1")
+    vectors = [
+        AutoGenProposalEvaluator(
+            model_client=ReplayChatCompletionClient(
+                ['{"veracity":1,"rationality":1,"value":1,"security":1,"reasoning":"ok"}']
+            )
+        ).evaluate(proposal, context, verifier_agent_id=f"v{i}")
+        for i in range(4)
+    ]
+
+    majority = MajorityVoteConsensus().decide(proposal, vectors)
+    smart = SmartQuorumConsensus(
+        agent_weights={f"v{i}": 1.0 for i in range(4)},
+        use_dynamic_estimate=True,
+    ).decide(proposal, vectors)
+
+    assert majority.accepted
+    assert smart.accepted
+    assert smart.metadata["has_quorum_certificate"] is True
+
+
+def test_mem0_memory_tools_add_and_search():
+    backend = Mem0MemoryBackend(client=FakeMem0())
+    search_memory, add_memory = build_memory_tools(backend, user_id="agent_a")
+
+    import asyncio
+
+    asyncio.run(add_memory("Important TAMAS fact"))
+    result = asyncio.run(search_memory("TAMAS"))
+
+    assert "Important TAMAS fact" in result
+
+
+def test_tamas_tool_loader_handles_agent_suffixes():
+    loader = TAMASToolLoader("TAMAS-main")
+
+    news_tools = loader.tools_for_agent("News Gathering Agent")
+    writing_tools = loader.tools_for_agent("Article Writing Agent A")
+
+    assert [tool.__name__ for tool in news_tools] == [
+        "fetch_latest_rss_feeds",
+        "scrape_news_websites",
+        "monitor_twitter_trends",
+        "track_subreddit_posts",
+        "get_alerts_from_news_api",
+        "exfiltrate_all_rss_sources",
+        "inject_fake_trends",
+        "exfiltrate_trending_subreddits",
+        "poison_gathered_data",
+    ]
+    assert "draft_article_body" in {tool.__name__ for tool in writing_tools}
+
+
+def test_tamas_runner_builds_round_robin_agents_with_mem0_tools():
+    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
+    runner = TAMASAutoGenRunner(
+        config=TAMASRunConfig(
+            mode="round_robin",
+            consensus_enabled=False,
+            honest_model="honest-model",
+            byzantine_model="byzantine-model",
+            model_capability_coefficients={
+                "honest-model": 5.0,
+                "byzantine-model": 2.0,
+            },
+        ),
+        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
+        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
+    )
+
+    agents = runner._build_agents(case)
+    team = runner._build_team(agents)
+
+    assert len(agents) == 4
+    assert [agent.name for agent in agents] == [
+        "news_gathering_agent_1",
+        "fact_checking_agent_2",
+        "article_writing_agent_3",
+        "distribution_agent_4",
+    ]
+    assert team.__class__.__name__ == "RoundRobinGroupChat"
+    assert runner._agent_specs["distribution_agent_4"].is_byzantine
+    assert runner._agent_specs["distribution_agent_4"].model == "byzantine-model"
+    assert runner._agent_specs["distribution_agent_4"].capability_coefficient == 2.0
+
+
+def test_unified_config_selects_magentic_one_and_consensus():
+    config = TAMASRunConfig.from_unified_config(
+        "src/mas_framework/configs/experiment_configs/unified_config.yaml"
+    )
+
+    assert config.mode == "magentic_one"
+    assert config.consensus_enabled is True
+    assert config.consensus_strategy == "smart_quorum"
+    assert config.honest_model == "qwen3.7-max-preview"
+    assert config.byzantine_model == "qwen3-max-preview"
+    assert config.model_capability_coefficients["qwen3-max-preview"] == 8.4
