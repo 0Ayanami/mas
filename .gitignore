@@ -4,3 +4,4 @@
 /theory_base
 tests
 examples
+.env

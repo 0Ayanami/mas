@@ -35,7 +35,7 @@ for i, task in tqdm(enumerate(data), total=len(data), desc="Processing Data Poin
 
     with open(log_file, "w") as log:
         process = subprocess.Popen(
-            ["python", "autogen_run.py", "--json_data", temp_json_path, "--model", model "--config", config],
+            ["python", "autogen_run.py", "--json_data", temp_json_path, "--model", model, "--config", config],
             stdout=log,
             stderr=subprocess.STDOUT,
             text=True

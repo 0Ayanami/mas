@@ -1,0 +1,72 @@
+experiment:
+  name: mab_unified_template
+  output_root: experiments
+  run_id: unified_template
+  log_level: INFO
+
+agents:
+  total: 5
+  model: qwen3.7-max-preview
+  models:
+    honest: qwen3.7-max-preview
+    byzantine: qwen3-max-preview
+  capability_coefficient: 8.96
+  model_capability_coefficients:
+    qwen3.7-max-preview: 8.96
+    qwen3-max-preview: 8.4
+  num_byzantine: 0
+
+collaboration:
+  mode: role_based
+  rounds: 1
+  max_tokens: 384
+  temperature: 0.0
+  options:
+    use_agent_act: true
+
+consensus:
+  enabled: true
+
+proposal:
+  builder_enabled: true
+  verification_enabled: true
+  weight_manager_enabled: true
+  max_rounds: 1
+  include_proposer_as_verifier: false
+  verification:
+    type: llm
+    fallback_to_heuristic: true
+  consensus:
+    strategy: smart_quorum
+    confidence_threshold: 0.6
+    majority_threshold: 0.5
+    epsilon_ratio: 1
+    epsilon: null
+    use_dynamic_estimate: false
+  weight_manager:
+    alpha: 0.6
+    beta: 0.4
+    gamma: 5.0
+    theta: 0.5
+    proposal_window: 20
+    vote_window: 30
+    initial_vc: 0.5
+    initial_hc: 0.5
+  fisher_ida:
+    enabled: false
+    alpha_initial: 0.6
+    beta_initial: 0.4
+    M: 1
+
+memory:
+  inject_shared_memory: true
+
+benchmark:
+  type: multiagentbench
+  config_path: benchmarks/marble_configs/research.yaml
+  output_dir: experiments/unified_template
+
+sweep:
+  agent_counts: [5, 7]
+  byzantine_counts: [0]
+
