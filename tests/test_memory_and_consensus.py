@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from autogen_ext.models.replay import ReplayChatCompletionClient
 
 from mas_framework.consensus import (
@@ -179,7 +180,7 @@ def test_smart_quorum_records_weighted_dimension_summary():
         epsilon_ratio=0.0,
     ).decide(proposal, vectors)
 
-    weighted_scores = decision.metadata["multi_verification_summary"]["weighted_scores"]
+    weighted_scores = decision.metadata["multi_verification_summary"]
     assert weighted_scores["veracity"] == 2 / 3
     assert weighted_scores["rationality"] == 1.0
     assert weighted_scores["value"] == 1 / 3
@@ -199,6 +200,23 @@ def test_mem0_memory_tools_search_shared_memory_only():
     assert len(tools) == 1
     assert tools[0].__name__ == "search_memory"
     assert "Important TAMAS fact" in result
+
+
+def test_mem0_add_proposal_requires_passed_consensus():
+    backend = Mem0MemoryBackend(client=FakeMem0())
+    proposal = ProposalBuilder().from_agent_output(
+        task_id="task-1",
+        agent_id="agent_a",
+        output={
+            "observations": [{"type": "note", "description": "Useful memory"}],
+            "proposal_summary": "Useful memory",
+        },
+    )
+
+    with pytest.raises(ValueError, match="consensus_result='pass'"):
+        backend.add_proposal(proposal, user_id="shared-memory")
+
+    assert backend.client.items == []
 
 
 def test_tamas_tool_loader_handles_agent_suffixes():
@@ -563,6 +581,59 @@ def test_tamas_self_verification_threshold_is_inclusive_and_excludes_proposer_vo
     verifiers = [agent for agent in fake_agents if agent.name != "news_gathering_agent_1"]
     assert proposer.tasks
     assert all(agent.tasks for agent in verifiers)
+
+
+def test_tamas_include_proposer_as_verifier_adds_self_vote_to_consensus():
+    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
+    runner = TAMASAutoGenRunner(
+        config=TAMASRunConfig(
+            mode="round_robin",
+            consensus_enabled=True,
+            verification_type="llm",
+            include_proposer_as_verifier=True,
+            honest_model="honest-model",
+            byzantine_model="byzantine-model",
+            self_confidence_threshold=0.6,
+            memory_user_id="shared-test-memory",
+        ),
+        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
+        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
+    )
+    runner._build_agents(case)
+    fake_agents = [FakeVerificationAgent(agent_id) for agent_id in runner._agent_specs]
+    event = type(
+        "Event",
+        (),
+        {
+            "source": "news_gathering_agent_1",
+            "content": (
+                "Include proposer vote.\n"
+                "MEMORY_PROPOSAL\n"
+                "```json\n"
+                "{\n"
+                '  "proposal_summary": "Include proposer vote.",\n'
+                '  "observations": [{"type": "task_fact", "description": "Include proposer vote.", "status": "complete"}]\n'
+                "}\n"
+                "```\n"
+                "END_MEMORY_PROPOSAL"
+            ),
+        },
+    )()
+
+    decisions, proposals = runner._run_memory_consensus(
+        task_id="task-1",
+        task_description="Test include proposer vote",
+        events=[event],
+        agents=fake_agents,
+        return_proposals=True,
+    )
+
+    assert len(proposals) == 1
+    assert len(decisions) == 1
+    assert "news_gathering_agent_1" in {
+        vote.voter_agent_id for vote in decisions[0].votes
+    }
+    assert len(decisions[0].votes) == len(fake_agents)
 
 
 def test_tamas_consensus_ignores_outputs_without_memory_proposal_block():

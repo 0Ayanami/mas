@@ -10,7 +10,6 @@ from mas_framework.consensus.models import (
     ConsensusResult,
     ConsensusVote,
     MemoryProposal,
-    MultiVerificationSummary,
     VERIFICATION_DIMENSIONS,
     VerificationVector,
 )
@@ -127,7 +126,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                     "agent_weights": dict(self.agent_weights),
                     "honest_agents": sorted(self.honest_agents),
                     "byzantine_agents": sorted(self.byzantine_agents),
-                    "multi_verification_summary": multi_verification.to_dict(),
+                    "multi_verification_summary": multi_verification,
                     "consensus_result": consensus_result.to_dict(),
                     **quorum,
                 },
@@ -169,7 +168,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "agent_weights": dict(self.agent_weights),
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),
-                "multi_verification_summary": multi_verification.to_dict(),
+                "multi_verification_summary": multi_verification,
                 "consensus_result": consensus_result.to_dict(),
                 **quorum,
             },
@@ -244,24 +243,20 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
     def _weighted_dimension_summary(
         self,
         votes: Sequence[ConsensusVote],
-    ) -> MultiVerificationSummary:
+    ) -> Dict[str, float]:
         total_weight = sum(max(vote.weight, 0.0) for vote in votes)
         if total_weight <= 0.0:
-            return MultiVerificationSummary(
-                weighted_scores={dimension: 0.0 for dimension in VERIFICATION_DIMENSIONS}
-            )
-        return MultiVerificationSummary(
-            weighted_scores={
-                dimension: (
-                    sum(
-                        getattr(vote.verification, dimension) * max(vote.weight, 0.0)
-                        for vote in votes
-                    )
-                    / total_weight
+            return {dimension: 0.0 for dimension in VERIFICATION_DIMENSIONS}
+        return {
+            dimension: (
+                sum(
+                    getattr(vote.verification, dimension) * max(vote.weight, 0.0)
+                    for vote in votes
                 )
-                for dimension in VERIFICATION_DIMENSIONS
-            }
-        )
+                / total_weight
+            )
+            for dimension in VERIFICATION_DIMENSIONS
+        }
 
     def fisher_ida_metadata(self) -> Dict[str, object]:
         """Return reserved Fisher-IDA optimizer settings for traces."""

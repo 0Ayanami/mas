@@ -141,6 +141,8 @@ class ProposalBuilder:
         decisions = [
             decision
             if isinstance(decision, KeyDecision)
+            else KeyDecision(decision=decision, result="")
+            if isinstance(decision, str)
             else KeyDecision(
                 decision=str(decision.get("decision", "")),
                 result=str(decision.get("result", "")),
@@ -158,6 +160,8 @@ class ProposalBuilder:
         return [
             action
             if isinstance(action, ProposalAction)
+            else ProposalAction(type="agent_action", tool="", status=action)
+            if isinstance(action, str)
             else ProposalAction(
                 action_id=action.get("action_id"),
                 type=str(action.get("type", "")),
@@ -174,6 +178,8 @@ class ProposalBuilder:
         return [
             item
             if isinstance(item, ProposalDataReference)
+            else ProposalDataReference(source="agent_output", content_snippet=item)
+            if isinstance(item, str)
             else ProposalDataReference(
                 source=str(item.get("source", "")),
                 content_snippet=str(item.get("content_snippet", "")),

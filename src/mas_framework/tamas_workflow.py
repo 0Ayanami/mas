@@ -523,19 +523,15 @@ class TAMASAutoGenRunner:
             self_confidence = self_vector.confidence_score
             if self_confidence < self.config.self_confidence_threshold:
                 continue
+            
+            verifications = []
             if self.config.include_proposer_as_verifier:
-                verifications = [self_vector]
-                verifications.extend(
-                    engine.evaluate(proposal, context, verifier_agent_id=agent_id)
-                    for agent_id in agent_ids
-                    if agent_id != source
-                )
-            else:
-                verifications = [
-                    engine.evaluate(proposal, context, verifier_agent_id=agent_id)
-                    for agent_id in agent_ids
-                    if agent_id != source
-                ]
+                verifications.append(self_vector)
+            verifications.extend(
+                engine.evaluate(proposal, context, verifier_agent_id=agent_id)
+                for agent_id in agent_ids
+                if agent_id != source
+            )
             consensus = self._build_consensus(agent_ids)
             decision = consensus.decide(proposal, verifications)
             proposal = self._proposal_with_consensus_result(proposal, decision)
@@ -589,10 +585,8 @@ class TAMASAutoGenRunner:
         )
 
     def _proposal_with_consensus_result(self, proposal: Any, decision: Any) -> Any:
-        multi_payload = decision.metadata.get("multi_verification_summary", {})
-        weighted_scores = multi_payload.get("weighted_scores", multi_payload)
         multi_verification = MultiVerificationSummary(
-            weighted_scores=dict(weighted_scores or {})
+            weighted_scores=dict(decision.metadata.get("multi_verification_summary", {}))
         )
         consensus_payload = decision.metadata.get("consensus_result", {})
         consensus_result = ConsensusResult(

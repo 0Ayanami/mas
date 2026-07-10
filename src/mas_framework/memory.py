@@ -55,6 +55,11 @@ class Mem0MemoryBackend:
         return list(response)
 
     def add_proposal(self, proposal: Any, user_id: str | None = None) -> Any:
+        consensus_result = _proposal_consensus_result(proposal)
+        if consensus_result != "pass":
+            raise ValueError(
+                "Only memory proposals with consensus_result='pass' can be uploaded to Mem0."
+            )
         return self.add(
             _proposal_json(proposal),
             user_id=user_id,
@@ -72,15 +77,23 @@ def _proposal_json(proposal: Any) -> str:
 
 def _proposal_metadata(proposal: Any) -> dict[str, Any]:
     header = getattr(proposal, "header", None)
+    consensus_result = _proposal_consensus_result(proposal)
     if header is None:
-        return {}
+        return {"consensus_result": consensus_result or ""}
     return {
         "proposal_id": getattr(header, "proposal_id", ""),
         "task_id": getattr(header, "task_id", ""),
         "agent_id": getattr(header, "agent_id", ""),
         "body_hash": getattr(header, "body_hash", ""),
         "timestamp": getattr(header, "timestamp", ""),
+        "consensus_result": consensus_result or "",
     }
+
+
+def _proposal_consensus_result(proposal: Any) -> str | None:
+    verification = getattr(proposal, "verification", None)
+    consensus_result = getattr(verification, "consensus_result", None)
+    return getattr(consensus_result, "result", None)
 
 
 def build_memory_tools(memory_backend: Mem0MemoryBackend, *, user_id: str | None = None):

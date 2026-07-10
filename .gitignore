@@ -10,3 +10,4 @@ __pycache__/
 .agents/
 .pytest_cache/
 src/mas_framework/__pycache__/
+experiments/

@@ -9,7 +9,6 @@ from mas_framework.consensus.models import (
     ConsensusResult,
     ConsensusVote,
     MemoryProposal,
-    MultiVerificationSummary,
     VERIFICATION_DIMENSIONS,
     VerificationVector,
 )
@@ -120,7 +119,7 @@ class MajorityVoteConsensus:
                     "reason": "minimum_votes_not_met",
                     "proposal_confidence_score": 0.0,
                     "proposal_confidence_method": "arithmetic_mean",
-                    "multi_verification_summary": multi_verification.to_dict(),
+                    "multi_verification_summary": multi_verification,
                     "consensus_result": consensus_result.to_dict(),
                 },
             )
@@ -156,7 +155,7 @@ class MajorityVoteConsensus:
                 "strategy": "majority_vote",
                 "proposal_confidence_score": proposal_confidence_score,
                 "proposal_confidence_method": "arithmetic_mean",
-                "multi_verification_summary": multi_verification.to_dict(),
+                "multi_verification_summary": multi_verification,
                 "consensus_result": consensus_result.to_dict(),
             },
         )
@@ -169,18 +168,14 @@ class MajorityVoteConsensus:
     def _average_dimension_summary(
         self,
         votes: Sequence[ConsensusVote],
-    ) -> MultiVerificationSummary:
+    ) -> dict[str, float]:
         if not votes:
-            return MultiVerificationSummary(
-                weighted_scores={dimension: 0.0 for dimension in VERIFICATION_DIMENSIONS}
+            return {dimension: 0.0 for dimension in VERIFICATION_DIMENSIONS}
+        return {
+            dimension: sum(
+                getattr(vote.verification, dimension)
+                for vote in votes
             )
-        return MultiVerificationSummary(
-            weighted_scores={
-                dimension: sum(
-                    getattr(vote.verification, dimension)
-                    for vote in votes
-                )
-                / len(votes)
-                for dimension in VERIFICATION_DIMENSIONS
-            }
-        )
+            / len(votes)
+            for dimension in VERIFICATION_DIMENSIONS
+        }
