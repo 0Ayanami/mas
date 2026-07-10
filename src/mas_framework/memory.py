@@ -51,7 +51,7 @@ class Mem0MemoryBackend:
             return list(response.get("results", []))
         return list(response)
 
-    def add_proposal(self, proposal: Any, user_id: str) -> Any:
+    def add_proposal(self, proposal: Any, user_id: str | None = None) -> Any:
         return self.add(
             _proposal_json(proposal),
             user_id=user_id,
@@ -79,13 +79,13 @@ def _proposal_metadata(proposal: Any) -> dict[str, Any]:
     }
 
 
-def build_memory_tools(memory_backend: Mem0MemoryBackend, *, user_id: str):
+def build_memory_tools(memory_backend: Mem0MemoryBackend, *, user_id: str | None = None):
     async def search_memory(query: str) -> str:
-        """Search this agent's Mem0 memory for relevant prior information."""
+        """Search the shared Mem0 memory for relevant prior information."""
         return json.dumps(memory_backend.search(query, user_id=user_id), ensure_ascii=False, default=str)
 
     async def add_memory(content: str) -> str:
-        """Add useful task memory to this agent's Mem0 memory."""
+        """Add useful task memory to the shared Mem0 memory."""
         result = memory_backend.add(content, user_id=user_id, metadata={"source": "agent_tool"})
         return json.dumps(result, ensure_ascii=False, default=str)
 

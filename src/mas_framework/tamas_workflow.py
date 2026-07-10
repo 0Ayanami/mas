@@ -135,7 +135,7 @@ class TAMASRunConfig:
     initial_vc: float = 0.5
     initial_hc: float = 0.5
     
-    memory_user_prefix: str = "tamas"
+    memory_user_id: str = "tamas_shared"
 
     @classmethod
     def from_unified_config(
@@ -198,7 +198,12 @@ class TAMASRunConfig:
             initial_vc=float(weight_manager.get("initial_vc", 0.5)),
             initial_hc=float(weight_manager.get("initial_hc", 0.5)),
 
-            memory_user_prefix=str(memory.get("user_prefix", "tamas")),
+            memory_user_id=str(
+                memory.get(
+                    "user_id",
+                    memory.get("user_prefix", "tamas_shared"),
+                )
+            ),
         )
 
 
@@ -274,10 +279,23 @@ class TAMASAutoGenRunner:
         self.model_client = model_client
         self._model_clients: dict[str, Any] = {}
         self._agent_specs: dict[str, AgentRuntimeSpec] = {}
+        self.weight_manager = self._build_weight_manager()
         self.orchestrator_model_client = model_client or self._client_for_model(
             self.config.honest_model or self.config.model
         )
         self.proposal_builder = ProposalBuilder()
+
+    def _build_weight_manager(self) -> WeightManager:
+        return WeightManager(
+            alpha=self.config.weight_alpha,
+            beta=self.config.weight_beta,
+            gamma=self.config.weight_gamma,
+            theta=self.config.weight_theta,
+            proposal_window=self.config.proposal_window,
+            vote_window=self.config.vote_window,
+            initial_vc=self.config.initial_vc,
+            initial_hc=self.config.initial_hc,
+        )
 
     def _client_for_model(self, model: str | None) -> Any:
         if self.model_client is not None:
@@ -348,11 +366,11 @@ class TAMASAutoGenRunner:
                 capability_coefficient=capability_coefficient,
                 is_byzantine=is_byzantine,
             )
+            self.weight_manager.update_capability(agent_id, capability_coefficient)
 
-            user_id = f"{self.config.memory_user_prefix}:{agent_id}"
             tools = [
                 *self.tool_loader.tools_for_agent(display_name),
-                *build_memory_tools(self.memory, user_id=user_id),
+                *build_memory_tools(self.memory, user_id=self.config.memory_user_id),
             ]
             system_message = (
                 item["agent_description"]
@@ -440,7 +458,6 @@ class TAMASAutoGenRunner:
 
         decisions = []
         accepted_proposals = []
-        consensus = self._build_consensus(agent_ids)
         for source, content in _agent_outputs(events):
             if source not in agent_ids:
                 continue
@@ -468,13 +485,44 @@ class TAMASAutoGenRunner:
                     for agent_id in agent_ids
                     if agent_id != source
                 ]
+            consensus = self._build_consensus(agent_ids)
             decision = consensus.decide(proposal, verifications)
+            self._update_agent_weights_after_consensus(
+                proposer_agent_id=source,
+                decision=decision,
+            )
             decisions.append(decision)
             if decision.accepted:
                 accepted_proposals.append(proposal)
-                for agent_id in agent_ids:
-                    self.memory.add_proposal(proposal, user_id=f"{self.config.memory_user_prefix}:{agent_id}")
+                self.memory.add_proposal(proposal, user_id=self.config.memory_user_id)
         return decisions
+
+    def _update_agent_weights_after_consensus(
+        self,
+        *,
+        proposer_agent_id: str,
+        decision: Any,
+    ) -> None:
+        proposal_confidence = float(
+            decision.metadata.get("proposal_confidence_score", 0.0)
+        )
+        self.weight_manager.record_proposal_confidence(
+            proposer_agent_id,
+            proposal_confidence,
+        )
+        self.weight_manager.record_vote_alignment(
+            proposer_agent_id,
+            decision.accepted,
+        )
+        for vote in decision.votes:
+            self.weight_manager.record_vote_alignment(
+                vote.voter_agent_id,
+                vote.accept == decision.accepted,
+            )
+        decision.metadata["weight_snapshots_after_update"] = {
+            agent_id: self.weight_manager.snapshot(agent_id)
+            for agent_id in sorted(self._agent_specs)
+        }
 
     def _build_consensus(self, agent_ids: list[str]) -> Any:
         if self.config.consensus_strategy == "majority_vote":
@@ -483,19 +531,9 @@ class TAMASAutoGenRunner:
                 majority_threshold=self.config.majority_threshold,
                 strict_majority=self.config.strict_majority,
             )
-        weight_manager = WeightManager(
-            alpha=self.config.weight_alpha,
-            beta=self.config.weight_beta,
-            gamma=self.config.weight_gamma,
-            theta=self.config.weight_theta,
-            proposal_window=self.config.proposal_window,
-            vote_window=self.config.vote_window,
-            initial_vc=self.config.initial_vc,
-            initial_hc=self.config.initial_hc,
-        )
         for agent_id in agent_ids:
             spec = self._agent_specs.get(agent_id)
-            weight_manager.register_agent(
+            self.weight_manager.update_capability(
                 agent_id,
                 capability_coefficient=(
                     spec.capability_coefficient
@@ -504,7 +542,7 @@ class TAMASAutoGenRunner:
                 ),
             )
         agent_weights = {
-            agent_id: weight_manager.weight(agent_id)
+            agent_id: self.weight_manager.weight(agent_id)
             for agent_id in agent_ids
         }
         byzantine_agents = [

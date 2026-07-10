@@ -7,11 +7,9 @@ from mas_framework.consensus import (
     SmartQuorumConsensus,
     VerificationEngine,
 )
-from mas_framework.common import AgentConfig
 from mas_framework.tamas_workflow import TAMASAutoGenRunner, TAMASRunConfig
 
 __all__ = [
-    "AgentConfig",
     "AgentWeightState",
     "AutoGenProposalEvaluator",
     "MajorityVoteConsensus",
