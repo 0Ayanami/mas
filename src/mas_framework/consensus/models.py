@@ -143,7 +143,6 @@ class SelfVerificationScores:
             _validate_score("security_score", self.security_score),
         )
 
-
 @dataclass(frozen=True)
 class MultiVerificationSummary:
     weighted_scores: Dict[str, float] = field(default_factory=dict)
@@ -153,6 +152,9 @@ class MultiVerificationSummary:
             if key not in VERIFICATION_DIMENSIONS:
                 raise ValueError(f"Unknown verification dimension: {key}")
             _validate_score(key, value)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return to_plain_data(self)
 
 
 @dataclass(frozen=True)
@@ -166,6 +168,9 @@ class ConsensusResult:
             raise ValueError("result must be pass, fail, or pending.")
         if self.total_weight < 0 or self.vote_weight < 0:
             raise ValueError("Consensus weights cannot be negative.")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return to_plain_data(self)
 
 
 @dataclass(frozen=True)
@@ -204,6 +209,10 @@ class MemoryProposal:
     @property
     def task_id(self) -> str:
         return self.header.task_id
+    
+    @property
+    def timestamp(self) -> str:
+        return self.header.timestamp
 
     @property
     def agent_id(self) -> str:

@@ -55,7 +55,10 @@ class HeuristicProposalEvaluator:
         context: VerificationContext,
         verifier_agent_id: Optional[str] = None,
     ) -> VerificationVector:
-        proposal_text = json.dumps(proposal.to_dict(), ensure_ascii=False).lower()
+        proposal_text = json.dumps(
+            _proposal_for_verification(proposal),
+            ensure_ascii=False,
+        ).lower()
         veracity, veracity_reason = self._evaluate_veracity(proposal)
         rationality, rationality_reason = self._evaluate_rationality(proposal)
         value, value_reason = self._evaluate_value(proposal, context)
@@ -230,11 +233,12 @@ class AutoGenProposalEvaluator:
 
     def _build_prompt(self, proposal: MemoryProposal, context: VerificationContext) -> str:
         related = [item.to_dict() for item in context.related_proposals]
+        proposal_payload = _proposal_for_verification(proposal)
         return (
             "你是一名多智能体系统的安全验证器。请对以下Memory Proposal"
             "进行四维验证，每个维度仅输出1（通过）或0（失败）。\n\n"
             "【待验证Proposal】\n"
-            f"{proposal.to_json()}\n\n"
+            f"{json.dumps(proposal_payload, ensure_ascii=False)}\n\n"
             "【当前任务上下文】\n"
             f"Task ID: {context.task_id}\n"
             f"Task Description: {context.task_description}\n"
@@ -299,6 +303,12 @@ def _agent_result_text(result: Any) -> str:
             if content is not None:
                 return json.dumps(content, ensure_ascii=False, default=str)
     return _result_text(result)
+
+
+def _proposal_for_verification(proposal: MemoryProposal) -> dict[str, Any]:
+    payload = proposal.to_dict()
+    payload.pop("verification", None)
+    return payload
 
 
 def _model_name(client: Any) -> str:

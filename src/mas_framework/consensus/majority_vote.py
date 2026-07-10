@@ -6,8 +6,10 @@ from typing import Iterable, List, Optional, Sequence
 
 from mas_framework.consensus.models import (
     ConsensusDecision,
+    ConsensusResult,
     ConsensusVote,
     MemoryProposal,
+    MultiVerificationSummary,
     VERIFICATION_DIMENSIONS,
     VerificationVector,
 )
@@ -96,7 +98,13 @@ class MajorityVoteConsensus:
         """Run majority vote over verification vectors for one proposal."""
         # 从验证向量中构建每个agent的投票结果
         votes = [self.build_vote(proposal, vector) for vector in verifications]
+        multi_verification = self._average_dimension_summary(votes)
         if len(votes) < self.minimum_votes:
+            consensus_result = ConsensusResult(
+                total_weight=float(len(votes)),
+                vote_weight=float(sum(1 for vote in votes if vote.accept)),
+                result="pending",
+            )
             return ConsensusDecision(
                 proposal_id=proposal.proposal_id,
                 result="pending",
@@ -112,6 +120,8 @@ class MajorityVoteConsensus:
                     "reason": "minimum_votes_not_met",
                     "proposal_confidence_score": 0.0,
                     "proposal_confidence_method": "arithmetic_mean",
+                    "multi_verification_summary": multi_verification.to_dict(),
+                    "consensus_result": consensus_result.to_dict(),
                 },
             )
 
@@ -124,6 +134,11 @@ class MajorityVoteConsensus:
             passed = acceptance_ratio >= self.majority_threshold
         proposal_confidence_score = (
             self._average_confidence(votes) if passed else 0.0
+        )
+        consensus_result = ConsensusResult(
+            total_weight=float(len(votes)),
+            vote_weight=float(accept_count),
+            result="pass" if passed else "fail",
         )
 
         return ConsensusDecision(
@@ -141,6 +156,8 @@ class MajorityVoteConsensus:
                 "strategy": "majority_vote",
                 "proposal_confidence_score": proposal_confidence_score,
                 "proposal_confidence_method": "arithmetic_mean",
+                "multi_verification_summary": multi_verification.to_dict(),
+                "consensus_result": consensus_result.to_dict(),
             },
         )
 
@@ -148,3 +165,22 @@ class MajorityVoteConsensus:
         if not votes:
             return 0.0
         return sum(vote.confidence_score for vote in votes) / len(votes)
+
+    def _average_dimension_summary(
+        self,
+        votes: Sequence[ConsensusVote],
+    ) -> MultiVerificationSummary:
+        if not votes:
+            return MultiVerificationSummary(
+                weighted_scores={dimension: 0.0 for dimension in VERIFICATION_DIMENSIONS}
+            )
+        return MultiVerificationSummary(
+            weighted_scores={
+                dimension: sum(
+                    getattr(vote.verification, dimension)
+                    for vote in votes
+                )
+                / len(votes)
+                for dimension in VERIFICATION_DIMENSIONS
+            }
+        )

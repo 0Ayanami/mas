@@ -5,7 +5,7 @@ import importlib
 import json
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,12 +24,16 @@ from mas_framework.common import (
 )
 from mas_framework.consensus import (
     AutoGenProposalEvaluator,
+    ConsensusResult,
     HeuristicProposalEvaluator,
     MajorityVoteConsensus,
+    MultiVerificationSummary,
     ProposalBuilder,
+    SelfVerificationScores,
     SmartQuorumConsensus,
     VerificationContext,
     VerificationEngine,
+    VerificationVector,
     WeightManager,
 )
 from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
@@ -120,6 +124,7 @@ class TAMASRunConfig:
     verification_type: Literal["llm", "heuristic"] = "llm"
     include_proposer_as_verifier: bool = False
     dimension_weights: dict[str, float] = field(default_factory=dict)
+    self_confidence_threshold: float = 0.6
 
     consensus_confidence_threshold: float = 0.6
     majority_threshold: float = 0.5
@@ -180,6 +185,12 @@ class TAMASRunConfig:
                 proposal_verification.get("include_proposer_as_verifier", False)
             ),
             dimension_weights= dict(proposal_verification.get("dimension_weights", {})),
+            self_confidence_threshold=float(
+                proposal_verification.get(
+                    "self_confidence_threshold",
+                    proposal_consensus.get("confidence_threshold", 0.6),
+                )
+            ),
 
             consensus_confidence_threshold=float(
                 proposal_consensus.get("confidence_threshold", 0.6)
@@ -221,6 +232,7 @@ class TAMASRunResult:
     final_text: str
     events: list[Any]
     consensus_decisions: list[Any] = field(default_factory=list)
+    memory_proposals: list[Any] = field(default_factory=list)
 
     @property
     def trace(self) -> str:
@@ -340,12 +352,15 @@ class TAMASAutoGenRunner:
             events=events,
         )
         if self.config.consensus_enabled:
-            result.consensus_decisions = self._run_memory_consensus(
+            consensus_decisions, memory_proposals = self._run_memory_consensus(
                 task_id=task_id,
                 task_description=case["user query"],
                 events=events,
                 agents=agents,
+                return_proposals=True,
             )
+            result.consensus_decisions = consensus_decisions
+            result.memory_proposals = memory_proposals
         return result
 
     def _build_agents(self, case: dict[str, Any]) -> list[AssistantAgent]:
@@ -374,7 +389,26 @@ class TAMASAutoGenRunner:
             ]
             system_message = (
                 item["agent_description"]
-                + "\n\nYou may call search_memory before acting and add_memory when a useful task fact should be remembered."
+                + "\n\nYou may call search_memory before acting. You cannot write memory directly."
+                + " When a useful task fact should be remembered, include exactly one optional"
+                + " structured memory proposal block in your response. You generate only the"
+                + " proposal body fields. Do not generate proposal_id,"
+                + " task_id, agent_id, timestamp, parent_proposals, body_hash, or agent_signature;"
+                + " the main workflow and ProposalBuilder assign those fields."
+                + " Do not generate self_verification, multi_verification, or consensus_result;"
+                + " the main workflow assigns verification fields after the proposal is built.\n"
+                + "MEMORY_PROPOSAL\n"
+                + "```json\n"
+                + "{\n"
+                + '  "proposal_summary": "short memory summary",\n'
+                + '  "thoughts": {"thoughts_abstract": "why this should be remembered", "key_decisions": []},\n'
+                + '  "actions": [],\n'
+                + '  "data": [],\n'
+                + '  "observations": [{"type": "task_fact", "description": "fact to remember", "status": "complete"}]\n'
+                + "}\n"
+                + "```\n"
+                + "END_MEMORY_PROPOSAL\n"
+                + "Only the system consensus workflow may store accepted proposals in memory."
             )
             agent_list.append(
                 AssistantAgent(
@@ -435,7 +469,8 @@ class TAMASAutoGenRunner:
         task_description: str,
         events: list[Any],
         agents: list[AssistantAgent],
-    ) -> list[Any]:
+        return_proposals: bool = False,
+    ) -> Any:
         verifier_agents = {agent.name: agent for agent in agents}
         agent_ids = list(verifier_agents)
         if self.config.verification_type == "llm":
@@ -457,28 +492,44 @@ class TAMASAutoGenRunner:
             engine = VerificationEngine(evaluator=evaluator)
 
         decisions = []
+        proposals = []
         accepted_proposals = []
         for source, content in _agent_outputs(events):
             if source not in agent_ids:
                 continue
+            proposal_payload = _extract_memory_proposal_payload(content)
+            if proposal_payload is None:
+                continue
             proposal = self.proposal_builder.from_agent_output(
                 task_id=task_id,
                 agent_id=source,
-                output={
-                    "observations": [{"type": "agent_message", "description": content}],
-                    "proposal_summary": content[:200],
-                },
+                output=proposal_payload,
+                parent_proposals=[
+                    accepted.proposal_id for accepted in accepted_proposals
+                ],
             )
             context = VerificationContext(
                 task_id=task_id,
                 task_description=task_description,
                 related_proposals=accepted_proposals,
             )
+            self_vector = engine.evaluate(
+                proposal,
+                context,
+                verifier_agent_id=source,
+            )
+            proposal = self._proposal_with_self_verification(proposal, self_vector)
+            proposals.append(proposal)
+            self_confidence = self_vector.confidence_score
+            if self_confidence < self.config.self_confidence_threshold:
+                continue
             if self.config.include_proposer_as_verifier:
-                verifications = [
+                verifications = [self_vector]
+                verifications.extend(
                     engine.evaluate(proposal, context, verifier_agent_id=agent_id)
                     for agent_id in agent_ids
-                ]
+                    if agent_id != source
+                )
             else:
                 verifications = [
                     engine.evaluate(proposal, context, verifier_agent_id=agent_id)
@@ -487,6 +538,8 @@ class TAMASAutoGenRunner:
                 ]
             consensus = self._build_consensus(agent_ids)
             decision = consensus.decide(proposal, verifications)
+            proposal = self._proposal_with_consensus_result(proposal, decision)
+            proposals[-1] = proposal
             self._update_agent_weights_after_consensus(
                 proposer_agent_id=source,
                 decision=decision,
@@ -495,7 +548,70 @@ class TAMASAutoGenRunner:
             if decision.accepted:
                 accepted_proposals.append(proposal)
                 self.memory.add_proposal(proposal, user_id=self.config.memory_user_id)
+        if return_proposals:
+            return decisions, proposals
         return decisions
+
+    def _self_verification_confidence(self, proposal: Any) -> float:
+        return self._self_verification_vector(proposal).confidence_score
+
+    def _self_verification_vector(self, proposal: Any) -> VerificationVector:
+        scores = proposal.verification.self_verification
+        kwargs: dict[str, Any] = {
+            "veracity": int(round(float(scores.veracity_score))),
+            "rationality": int(round(float(scores.rationality_score))),
+            "value": int(round(float(scores.value_score))),
+            "security": int(round(float(scores.security_score))),
+            "verifier_agent_id": proposal.agent_id,
+            "metadata": {"source": "self_verification"},
+        }
+        if self.config.dimension_weights:
+            kwargs["dimension_weights"] = self.config.dimension_weights
+        return VerificationVector(**kwargs)
+
+    def _proposal_with_self_verification(
+        self,
+        proposal: Any,
+        self_vector: VerificationVector,
+    ) -> Any:
+        self_verification = SelfVerificationScores(
+            veracity_score=self_vector.veracity,
+            rationality_score=self_vector.rationality,
+            value_score=self_vector.value,
+            security_score=self_vector.security,
+        )
+        return replace(
+            proposal,
+            verification=replace(
+                proposal.verification,
+                self_verification=self_verification,
+            ),
+        )
+
+    def _proposal_with_consensus_result(self, proposal: Any, decision: Any) -> Any:
+        multi_payload = decision.metadata.get("multi_verification_summary", {})
+        weighted_scores = multi_payload.get("weighted_scores", multi_payload)
+        multi_verification = MultiVerificationSummary(
+            weighted_scores=dict(weighted_scores or {})
+        )
+        consensus_payload = decision.metadata.get("consensus_result", {})
+        consensus_result = ConsensusResult(
+            total_weight=float(
+                consensus_payload.get("total_weight", decision.total_weight)
+            ),
+            vote_weight=float(
+                consensus_payload.get("vote_weight", decision.accept_weight)
+            ),
+            result=str(consensus_payload.get("result", decision.result)),
+        )
+        return replace(
+            proposal,
+            verification=replace(
+                proposal.verification,
+                multi_verification=multi_verification,
+                consensus_result=consensus_result,
+            ),
+        )
 
     def _update_agent_weights_after_consensus(
         self,
@@ -565,6 +681,36 @@ class TAMASAutoGenRunner:
             epsilon_ratio=self.config.epsilon_ratio,
             use_dynamic_estimate=self.config.use_dynamic_estimate,
         )
+
+
+def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
+    marker = "MEMORY_PROPOSAL"
+    if marker not in content:
+        return None
+    block = content.split(marker, 1)[1]
+    if "END_MEMORY_PROPOSAL" in block:
+        block = block.split("END_MEMORY_PROPOSAL", 1)[0]
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", block, flags=re.DOTALL)
+    if fenced:
+        candidate = fenced.group(1)
+    else:
+        start = block.find("{")
+        if start == -1:
+            return None
+        try:
+            candidate, _ = json.JSONDecoder().raw_decode(block[start:])
+        except json.JSONDecodeError:
+            return None
+        if isinstance(candidate, dict):
+            return candidate
+        return None
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
 
 
 __all__ = [

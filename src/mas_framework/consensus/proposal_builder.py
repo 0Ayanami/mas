@@ -114,7 +114,7 @@ class ProposalBuilder:
                 data=output.get("data"),
                 observations=output.get("observations")
                 or [{"type": "agent_output", "description": str(output)}],
-                self_verification=self_verification or output.get("self_verification"),
+                self_verification=self_verification,
                 parent_proposals=parent_proposals,
                 proposal_summary=proposal_summary or output.get("proposal_summary"),
             )

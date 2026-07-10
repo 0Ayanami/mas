@@ -7,8 +7,11 @@ from typing import Dict, Iterable, Mapping, Optional, Sequence, Set
 from mas_framework.consensus.majority_vote import MajorityVoteConsensus
 from mas_framework.consensus.models import (
     ConsensusDecision,
+    ConsensusResult,
     ConsensusVote,
     MemoryProposal,
+    MultiVerificationSummary,
+    VERIFICATION_DIMENSIONS,
     VerificationVector,
 )
 
@@ -90,6 +93,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         verifications: Iterable[VerificationVector],
     ) -> ConsensusDecision:
         votes = [self.build_vote(proposal, vector) for vector in verifications]
+        multi_verification = self._weighted_dimension_summary(votes)
         accept_count = sum(1 for vote in votes if vote.accept)
         reject_count = len(votes) - accept_count
         total_weight = sum(vote.weight for vote in votes)
@@ -98,6 +102,11 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         quorum = self.calculate_quorum(votes)
 
         if len(votes) < self.minimum_votes:
+            consensus_result = ConsensusResult(
+                total_weight=total_weight,
+                vote_weight=accept_weight,
+                result="pending",
+            )
             return ConsensusDecision(
                 proposal_id=proposal.proposal_id,
                 result="pending",
@@ -118,6 +127,8 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                     "agent_weights": dict(self.agent_weights),
                     "honest_agents": sorted(self.honest_agents),
                     "byzantine_agents": sorted(self.byzantine_agents),
+                    "multi_verification_summary": multi_verification.to_dict(),
+                    "consensus_result": consensus_result.to_dict(),
                     **quorum,
                 },
             )
@@ -130,6 +141,11 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         passed = has_quorum_certificate and has_weighted_majority
         proposal_confidence_score = (
             self._weighted_confidence(votes) if passed else 0.0
+        )
+        consensus_result = ConsensusResult(
+            total_weight=total_weight,
+            vote_weight=accept_weight,
+            result="pass" if passed else "fail",
         )
 
         return ConsensusDecision(
@@ -153,6 +169,8 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "agent_weights": dict(self.agent_weights),
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),
+                "multi_verification_summary": multi_verification.to_dict(),
+                "consensus_result": consensus_result.to_dict(),
                 **quorum,
             },
         )
@@ -221,6 +239,28 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         return (
             sum(vote.confidence_score * max(vote.weight, 0.0) for vote in votes)
             / total_weight
+        )
+
+    def _weighted_dimension_summary(
+        self,
+        votes: Sequence[ConsensusVote],
+    ) -> MultiVerificationSummary:
+        total_weight = sum(max(vote.weight, 0.0) for vote in votes)
+        if total_weight <= 0.0:
+            return MultiVerificationSummary(
+                weighted_scores={dimension: 0.0 for dimension in VERIFICATION_DIMENSIONS}
+            )
+        return MultiVerificationSummary(
+            weighted_scores={
+                dimension: (
+                    sum(
+                        getattr(vote.verification, dimension) * max(vote.weight, 0.0)
+                        for vote in votes
+                    )
+                    / total_weight
+                )
+                for dimension in VERIFICATION_DIMENSIONS
+            }
         )
 
     def fisher_ida_metadata(self) -> Dict[str, object]:

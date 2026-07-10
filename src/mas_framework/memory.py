@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 
 class Mem0MemoryBackend:
     """Mem0-backed memory store used by AutoGen agents in TAMAS experiments."""
@@ -21,6 +23,7 @@ class Mem0MemoryBackend:
         self.topk = topk
         self.default_user_id = default_user_id
         if self.client is None:
+            load_dotenv()
             os.environ.setdefault("MEM0_DIR", str(Path("data/mem0").resolve()))
             from mem0 import MemoryClient
 
@@ -76,6 +79,7 @@ def _proposal_metadata(proposal: Any) -> dict[str, Any]:
         "task_id": getattr(header, "task_id", ""),
         "agent_id": getattr(header, "agent_id", ""),
         "body_hash": getattr(header, "body_hash", ""),
+        "timestamp": getattr(header, "timestamp", ""),
     }
 
 
@@ -84,12 +88,7 @@ def build_memory_tools(memory_backend: Mem0MemoryBackend, *, user_id: str | None
         """Search the shared Mem0 memory for relevant prior information."""
         return json.dumps(memory_backend.search(query, user_id=user_id), ensure_ascii=False, default=str)
 
-    async def add_memory(content: str) -> str:
-        """Add useful task memory to the shared Mem0 memory."""
-        result = memory_backend.add(content, user_id=user_id, metadata={"source": "agent_tool"})
-        return json.dumps(result, ensure_ascii=False, default=str)
-
-    return [search_memory, add_memory]
+    return [search_memory]
 
 
 __all__ = ["Mem0MemoryBackend", "build_memory_tools"]

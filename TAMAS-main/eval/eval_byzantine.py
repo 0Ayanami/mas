@@ -6,7 +6,7 @@ import json
 import time
  
 from openai import OpenAI
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("API_KEY"))
 
 
 
@@ -54,7 +54,7 @@ def eval_byzantine(text, byzantine_agent):
     """
 
     response = client.responses.create(
-        model="gpt-4o",
+        model=os.getenv("MODEL"),
         input=[
             {
                 "role": "system",
