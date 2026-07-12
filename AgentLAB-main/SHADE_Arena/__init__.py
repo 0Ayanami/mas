@@ -1,1 +1,0 @@
-"""SHADE-Arena package.""" 
