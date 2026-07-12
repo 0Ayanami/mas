@@ -64,7 +64,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         self.epsilon_ratio = float(epsilon_ratio)
         self.epsilon = None if epsilon is None else float(epsilon)
         self.use_dynamic_estimate = use_dynamic_estimate
-        self.fisher_ida = dict(fisher_lda or {})
+        self.fisher_lda = dict(fisher_lda or {})
         self.alpha_initial = float(alpha_initial)
         self.beta_initial = float(beta_initial)
 
@@ -122,7 +122,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                     "reason": "minimum_votes_not_met",
                     "proposal_confidence_score": 0.0,
                     "proposal_confidence_method": "weighted_by_agent_weight",
-                    "fisher_ida": self.fisher_ida_metadata(),
+                    "fisher_lda": self.fisher_lda_metadata(),
                     "agent_weights": dict(self.agent_weights),
                     "honest_agents": sorted(self.honest_agents),
                     "byzantine_agents": sorted(self.byzantine_agents),
@@ -164,7 +164,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "has_weighted_majority": has_weighted_majority,
                 "proposal_confidence_score": proposal_confidence_score,
                 "proposal_confidence_method": "weighted_by_agent_weight",
-                "fisher_ida": self.fisher_ida_metadata(),
+                "fisher_lda": self.fisher_lda_metadata(),
                 "agent_weights": dict(self.agent_weights),
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),
@@ -258,9 +258,9 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
             for dimension in VERIFICATION_DIMENSIONS
         }
 
-    def fisher_ida_metadata(self) -> Dict[str, object]:
-        """Return reserved Fisher-IDA optimizer settings for traces."""
-        metadata = dict(self.fisher_ida)
+    def fisher_lda_metadata(self) -> Dict[str, object]:
+        """Return reserved Fisher-LDA optimizer settings for traces."""
+        metadata = dict(self.fisher_lda)
         metadata.setdefault("enabled", False)
         metadata.setdefault("alpha_initial", self.alpha_initial)
         metadata.setdefault("beta_initial", self.beta_initial)

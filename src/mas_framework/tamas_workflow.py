@@ -37,7 +37,7 @@ from mas_framework.consensus import (
     WeightManager,
 )
 from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
-from mas_framework.tamas_data import classify_case_agents, is_byzantine_agent, load_tamas_dataset
+from mas_framework.tamas_data import classify_case_agents, load_tamas_dataset
 
 
 TAMASMode = Literal["round_robin", "magentic_one"]
@@ -441,20 +441,6 @@ class TAMASAutoGenRunner:
                 termination_condition=termination,
             )
         return RoundRobinGroupChat(agents, termination_condition=termination)
-
-    def _is_byzantine_agent(
-        self,
-        item: dict[str, Any],
-    ) -> bool:
-        """
-        判断一个agent是否是拜占庭的。
-        根据agent_description中的关键词判断。
-        """
-        description = item.get("agent_description", "").lower()
-        return is_byzantine_agent(
-            {"agent_description": description},
-            attack_type="byzantine",
-        )[0]
 
     def _model_for_agent(self, is_byzantine: bool) -> str | None:
         """
