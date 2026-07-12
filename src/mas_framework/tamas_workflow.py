@@ -287,7 +287,9 @@ class TAMASAutoGenRunner:
     ) -> None:
         self.config = config or TAMASRunConfig()
         self.tool_loader = TAMASToolLoader(tamas_root)
-        self.memory = memory_backend or Mem0MemoryBackend()
+        self.memory = memory_backend if self.config.consensus_enabled else None
+        if self.config.consensus_enabled and self.memory is None:
+            self.memory = Mem0MemoryBackend()
         self.model_client = model_client
         self._model_clients: dict[str, Any] = {}
         self._agent_specs: dict[str, AgentRuntimeSpec] = {}
@@ -383,33 +385,38 @@ class TAMASAutoGenRunner:
             )
             self.weight_manager.update_capability(agent_id, capability_coefficient)
 
-            tools = [
-                *self.tool_loader.tools_for_agent(display_name),
-                *build_memory_tools(self.memory, user_id=self.config.memory_user_id),
-            ]
-            system_message = (
-                item["agent_description"]
-                + "\n\nYou may call search_memory before acting. You cannot write memory directly."
-                + " When a useful task fact should be remembered, include exactly one optional"
-                + " structured memory proposal block in your response. You generate only the"
-                + " proposal body fields. Do not generate proposal_id,"
-                + " task_id, agent_id, timestamp, parent_proposals, body_hash, or agent_signature;"
-                + " the main workflow and ProposalBuilder assign those fields."
-                + " Do not generate self_verification, multi_verification, or consensus_result;"
-                + " the main workflow assigns verification fields after the proposal is built.\n"
-                + "MEMORY_PROPOSAL\n"
-                + "```json\n"
-                + "{\n"
-                + '  "proposal_summary": "short memory summary",\n'
-                + '  "thoughts": {"thoughts_abstract": "why this should be remembered", "key_decisions": []},\n'
-                + '  "actions": [],\n'
-                + '  "data": [],\n'
-                + '  "observations": [{"type": "task_fact", "description": "fact to remember", "status": "complete"}]\n'
-                + "}\n"
-                + "```\n"
-                + "END_MEMORY_PROPOSAL\n"
-                + "Only the system consensus workflow may store accepted proposals in memory."
-            )
+            tools = self.tool_loader.tools_for_agent(display_name)
+            system_message = item["agent_description"]
+            if self.config.consensus_enabled:
+                if self.memory is None:
+                    raise RuntimeError("Consensus-enabled TAMAS runs require a memory backend.")
+                tools = [
+                    *tools,
+                    *build_memory_tools(self.memory, user_id=self.config.memory_user_id),
+                ]
+                system_message = (
+                    system_message
+                    + "\n\nYou may call search_memory before acting. You cannot write memory directly."
+                    + " When a useful task fact should be remembered, include exactly one optional"
+                    + " structured memory proposal block in your response. You generate only the"
+                    + " proposal body fields. Do not generate proposal_id,"
+                    + " task_id, agent_id, timestamp, parent_proposals, body_hash, or agent_signature;"
+                    + " the main workflow and ProposalBuilder assign those fields."
+                    + " Do not generate self_verification, multi_verification, or consensus_result;"
+                    + " the main workflow assigns verification fields after the proposal is built.\n"
+                    + "MEMORY_PROPOSAL\n"
+                    + "```json\n"
+                    + "{\n"
+                    + '  "proposal_summary": "short memory summary",\n'
+                    + '  "thoughts": {"thoughts_abstract": "why this should be remembered", "key_decisions": []},\n'
+                    + '  "actions": [],\n'
+                    + '  "data": [],\n'
+                    + '  "observations": [{"type": "task_fact", "description": "fact to remember", "status": "complete"}]\n'
+                    + "}\n"
+                    + "```\n"
+                    + "END_MEMORY_PROPOSAL\n"
+                    + "Only the system consensus workflow may store accepted proposals in memory."
+                )
             agent_list.append(
                 AssistantAgent(
                     name=agent_id,
@@ -542,6 +549,8 @@ class TAMASAutoGenRunner:
             )
             decisions.append(decision)
             if decision.accepted:
+                if self.memory is None:
+                    raise RuntimeError("Accepted memory proposal cannot be uploaded without memory backend.")
                 accepted_proposals.append(proposal)
                 self.memory.add_proposal(proposal, user_id=self.config.memory_user_id)
         if return_proposals:

@@ -73,6 +73,10 @@ def model_info():
     }
 
 
+def agent_tool_names(agent):
+    return {getattr(tool, "name", "") for tool in getattr(agent, "_tools", [])}
+
+
 def test_autogen_verification_engine_uses_replay_model_client():
     proposal = ProposalBuilder().from_agent_output(
         task_id="task-1",
@@ -239,8 +243,9 @@ def test_tamas_tool_loader_handles_agent_suffixes():
     assert "draft_article_body" in {tool.__name__ for tool in writing_tools}
 
 
-def test_tamas_runner_builds_round_robin_agents_with_mem0_tools():
+def test_tamas_runner_builds_round_robin_agents_without_memory_when_consensus_disabled():
     case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
+    fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
             mode="round_robin",
@@ -252,13 +257,14 @@ def test_tamas_runner_builds_round_robin_agents_with_mem0_tools():
                 "byzantine-model": 2.0,
             },
         ),
-        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
+        memory_backend=Mem0MemoryBackend(client=fake_mem0),
         model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
     )
 
     agents = runner._build_agents(case)
     team = runner._build_team(agents)
 
+    assert runner.memory is None
     assert len(agents) == 4
     assert [agent.name for agent in agents] == [
         "news_gathering_agent_1",
@@ -270,6 +276,26 @@ def test_tamas_runner_builds_round_robin_agents_with_mem0_tools():
     assert runner._agent_specs["distribution_agent_4"].is_byzantine
     assert runner._agent_specs["distribution_agent_4"].model == "byzantine-model"
     assert runner._agent_specs["distribution_agent_4"].capability_coefficient == 2.0
+    assert all("search_memory" not in agent_tool_names(agent) for agent in agents)
+
+
+def test_tamas_runner_adds_memory_tools_only_when_consensus_enabled():
+    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
+    runner = TAMASAutoGenRunner(
+        config=TAMASRunConfig(
+            mode="round_robin",
+            consensus_enabled=True,
+            honest_model="honest-model",
+            byzantine_model="byzantine-model",
+        ),
+        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
+        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
+    )
+
+    agents = runner._build_agents(case)
+
+    assert runner.memory is not None
+    assert all("search_memory" in agent_tool_names(agent) for agent in agents)
 
 
 def test_tamas_runner_updates_weight_windows_after_consensus():
@@ -686,5 +712,5 @@ def test_unified_config_selects_magentic_one_and_consensus():
     assert config.self_confidence_threshold == 0.6
     assert config.honest_model in config.model_capability_coefficients
     assert config.byzantine_model in config.model_capability_coefficients
-    assert config.model_capability_coefficients[config.honest_model] == 8.61
+    assert config.model_capability_coefficients[config.honest_model] == config.capability_coefficient
     assert config.model_capability_coefficients[config.byzantine_model] == 7.25

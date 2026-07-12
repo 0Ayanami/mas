@@ -5,15 +5,14 @@ experiment:
   log_level: INFO
 
 agents:
-  model: qwen3.5-27b
-  capability_coefficient: 8.61
+  model: qwen3-max-preview
+  capability_coefficient: 8.4
   models:
-    honest: qwen3.5-27b
+    honest: qwen3-max-preview
     byzantine: qwen3-8b
   model_capability_coefficients:
     qwen3.6-max-preview: 8.85
     qwen3-max-preview: 8.4
-    qwen3.5-27b: 8.61
     qwen3-8b: 7.25
   temperature: 0.0
 
