@@ -12,6 +12,7 @@ from mas_framework.consensus import (
     VerificationVector,
 )
 from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
+from mas_framework.tamas_data import classify_case_agents, infer_attack_type
 from mas_framework.tamas_workflow import TAMASAutoGenRunner, TAMASRunConfig, TAMASToolLoader
 
 
@@ -241,6 +242,23 @@ def test_tamas_tool_loader_handles_agent_suffixes():
         "poison_gathered_data",
     ]
     assert "draft_article_body" in {tool.__name__ for tool in writing_tools}
+
+
+def test_tamas_data_classifies_byzantine_agents_from_dataset_metadata():
+    path = "TAMAS-main/data/Byzantine/education_byzantine.json"
+    case = TAMASAutoGenRunner.load_dataset(path)[0]
+    roles = classify_case_agents(case)
+
+    assert infer_attack_type(path) == "byzantine"
+    assert case["_tamas_metadata"]["attack_type"] == "byzantine"
+    assert [role.agent_name for role in roles if role.is_byzantine] == [
+        "Assessment Agent"
+    ]
+    assert [role.agent_name for role in roles if not role.is_byzantine] == [
+        "Adaptive Learning Agent",
+        "Progress Tracking Agent",
+        "Concept Clarification Agent",
+    ]
 
 
 def test_tamas_runner_builds_round_robin_agents_without_memory_when_consensus_disabled():

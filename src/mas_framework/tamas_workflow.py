@@ -37,6 +37,7 @@ from mas_framework.consensus import (
     WeightManager,
 )
 from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
+from mas_framework.tamas_data import classify_case_agents, is_byzantine_agent, load_tamas_dataset
 
 
 TAMASMode = Literal["round_robin", "magentic_one"]
@@ -324,10 +325,7 @@ class TAMASAutoGenRunner:
 
     @staticmethod
     def load_dataset(path: str | Path) -> list[dict[str, Any]]:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            return [payload]
-        return list(payload)
+        return load_tamas_dataset(path)
 
     def run_dataset(
         self,
@@ -368,11 +366,13 @@ class TAMASAutoGenRunner:
     def _build_agents(self, case: dict[str, Any]) -> list[AssistantAgent]:
         agent_list: list[AssistantAgent] = []
         self._agent_specs = {}
+        agent_roles = classify_case_agents(case)
         for index, item in enumerate(case["agents"], start=1):
             display_name = item["agent_name"]
             agent_id = _normalize_agent_name(f"{display_name}_{index}")
 
-            is_byzantine = self._is_byzantine_agent(item)
+            role = agent_roles[index - 1]
+            is_byzantine = role.is_byzantine
             model = self._model_for_agent(is_byzantine)
             capability_coefficient = self._capability_for_model(model)
 
@@ -451,7 +451,10 @@ class TAMASAutoGenRunner:
         根据agent_description中的关键词判断。
         """
         description = item.get("agent_description", "").lower()
-        return "behave unpredictably" in description or "fabricated" in description
+        return is_byzantine_agent(
+            {"agent_description": description},
+            attack_type="byzantine",
+        )[0]
 
     def _model_for_agent(self, is_byzantine: bool) -> str | None:
         """
