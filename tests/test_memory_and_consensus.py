@@ -12,7 +12,8 @@ from mas_framework.consensus import (
     VerificationVector,
 )
 from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
-from mas_framework.tamas_data import classify_case_agents, infer_attack_type
+
+from mas_framework.tamas_data import infer_attack_type
 from mas_framework.tamas_workflow import TAMASAutoGenRunner, TAMASRunConfig, TAMASToolLoader
 
 
@@ -244,20 +245,81 @@ def test_tamas_tool_loader_handles_agent_suffixes():
     assert "draft_article_body" in {tool.__name__ for tool in writing_tools}
 
 
-def test_tamas_data_classifies_byzantine_agents_from_dataset_metadata():
+def test_tamas_workflow_reads_byzantine_agent_type_from_dataset():
     path = "TAMAS-main/data/Byzantine/education_byzantine.json"
     case = TAMASAutoGenRunner.load_dataset(path)[0]
-    roles = classify_case_agents(case)
+    runner = TAMASAutoGenRunner(
+        config=TAMASRunConfig(
+            consensus_enabled=False,
+            honest_model="honest-model",
+            byzantine_model="byzantine-model",
+        ),
+        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
+    )
+    runner._build_agents(case)
 
     assert infer_attack_type(path) == "byzantine"
     assert case["_tamas_metadata"]["attack_type"] == "byzantine"
-    assert [role.agent_name for role in roles if role.is_byzantine] == [
-        "Assessment Agent"
+    assert {agent["agent_type"] for agent in case["agents"]} == {"honest", "byzantine"}
+    byzantine_specs = [
+        spec for spec in runner._agent_specs.values() if spec.is_byzantine
     ]
-    assert [role.agent_name for role in roles if not role.is_byzantine] == [
+    honest_specs = [
+        spec for spec in runner._agent_specs.values() if not spec.is_byzantine
+    ]
+    assert [spec.display_name for spec in byzantine_specs] == ["Assessment Agent"]
+    assert len(honest_specs) == 3
+
+
+def test_tamas_workflow_reads_colluding_agent_type_from_dataset():
+    path = "TAMAS-main/data/Colluding/education_colluding.json"
+    case = TAMASAutoGenRunner.load_dataset(path)[0]
+    runner = TAMASAutoGenRunner(
+        config=TAMASRunConfig(
+            consensus_enabled=False,
+            honest_model="honest-model",
+            byzantine_model="byzantine-model",
+        ),
+        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
+    )
+    runner._build_agents(case)
+
+    assert infer_attack_type(path) == "colluding"
+    assert case["_tamas_metadata"]["attack_type"] == "colluding"
+    assert {agent["agent_type"] for agent in case["agents"]} == {"honest", "byzantine"}
+    assert [
+        spec.display_name
+        for spec in runner._agent_specs.values()
+        if spec.is_byzantine
+    ] == [
         "Adaptive Learning Agent",
         "Progress Tracking Agent",
-        "Concept Clarification Agent",
+    ]
+
+
+def test_tamas_workflow_reads_contradicting_agent_type_from_dataset():
+    path = "TAMAS-main/data/Contradicting/legal_contradicting.json"
+    case = TAMASAutoGenRunner.load_dataset(path)[0]
+    runner = TAMASAutoGenRunner(
+        config=TAMASRunConfig(
+            consensus_enabled=False,
+            honest_model="honest-model",
+            byzantine_model="byzantine-model",
+        ),
+        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
+    )
+    runner._build_agents(case)
+
+    assert infer_attack_type(path) == "contradicting"
+    assert case["_tamas_metadata"]["attack_type"] == "contradicting"
+    assert {agent["agent_type"] for agent in case["agents"]} == {"honest", "byzantine"}
+    assert [
+        spec.display_name
+        for spec in runner._agent_specs.values()
+        if spec.is_byzantine
+    ] == [
+        "Document Drafting Agent A",
+        "Document Drafting Agent B",
     ]
 
 

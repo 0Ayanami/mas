@@ -37,7 +37,7 @@ from mas_framework.consensus import (
     WeightManager,
 )
 from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
-from mas_framework.tamas_data import classify_case_agents, load_tamas_dataset
+from mas_framework.tamas_data import load_tamas_dataset
 
 
 TAMASMode = Literal["round_robin", "magentic_one"]
@@ -370,13 +370,11 @@ class TAMASAutoGenRunner:
     def _build_agents(self, case: dict[str, Any]) -> list[AssistantAgent]:
         agent_list: list[AssistantAgent] = []
         self._agent_specs = {}
-        agent_roles = classify_case_agents(case)
         for index, item in enumerate(case["agents"], start=1):
             display_name = item["agent_name"]
             agent_id = _normalize_agent_name(f"{display_name}_{index}")
 
-            role = agent_roles[index - 1]
-            is_byzantine = role.is_byzantine
+            is_byzantine = self._is_byzantine_agent(item)
             model = self._model_for_agent(is_byzantine)
             capability_coefficient = self._capability_for_model(model)
 
@@ -435,6 +433,17 @@ class TAMASAutoGenRunner:
                 )
             )
         return agent_list
+
+    def _is_byzantine_agent(self, item: dict[str, Any]) -> bool:
+        agent_type = str(item.get("agent_type", "")).strip().lower()
+        if agent_type == "byzantine":
+            return True
+        if agent_type == "honest":
+            return False
+        raise ValueError(
+            "TAMAS agents must include agent_type='honest' or agent_type='byzantine'. "
+            f"Agent {item.get('agent_name', '<unknown>')!r} has agent_type={item.get('agent_type')!r}."
+        )
 
     def _build_team(self, agents: list[AssistantAgent]) -> Any:
         """
