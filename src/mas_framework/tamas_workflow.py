@@ -121,6 +121,7 @@ class TAMASRunConfig:
     
     consensus_enabled: bool = False
     consensus_strategy: Literal["majority_vote", "smart_quorum"] = "smart_quorum"
+    max_memory_proposals_per_agent_per_case: int = 1
 
     verification_type: Literal["llm", "heuristic"] = "llm"
     include_proposer_as_verifier: bool = False
@@ -180,6 +181,9 @@ class TAMASRunConfig:
                 proposal.get("enabled", False),
             ),
             consensus_strategy=proposal_consensus.get("strategy", "smart_quorum"),
+            max_memory_proposals_per_agent_per_case=int(
+                proposal.get("max_per_agent_per_case", 1)
+            ),
 
             verification_type=proposal_verification.get("type", "llm"),
             include_proposer_as_verifier=bool(
@@ -390,6 +394,7 @@ class TAMASAutoGenRunner:
             if self.config.consensus_enabled:
                 if self.memory is None:
                     raise RuntimeError("Consensus-enabled TAMAS runs require a memory backend.")
+                max_proposals = self.config.max_memory_proposals_per_agent_per_case
                 tools = [
                     *tools,
                     *build_memory_tools(self.memory, user_id=self.config.memory_user_id),
@@ -397,8 +402,11 @@ class TAMASAutoGenRunner:
                 system_message = (
                     system_message
                     + "\n\nYou may call search_memory before acting. You cannot write memory directly."
-                    + " When a useful task fact should be remembered, include exactly one optional"
-                    + " structured memory proposal block in your response. You generate only the"
+                    + " After the case task is complete, decide whether a useful task fact should"
+                    + " be remembered. If so, include at most one optional structured memory"
+                    + f" proposal block in your final relevant response. This case allows at most {max_proposals}"
+                    + " memory proposal(s) from you; additional proposal blocks will be ignored by"
+                    + " the main workflow. You generate only the"
                     + " proposal body fields. Do not generate proposal_id,"
                     + " task_id, agent_id, timestamp, parent_proposals, body_hash, or agent_signature;"
                     + " the main workflow and ProposalBuilder assign those fields."
@@ -490,12 +498,20 @@ class TAMASAutoGenRunner:
         decisions = []
         proposals = []
         accepted_proposals = []
+        proposal_counts_by_agent: dict[str, int] = {}
+        max_proposals_per_agent = self.config.max_memory_proposals_per_agent_per_case
         for source, content in _agent_outputs(events):
             if source not in agent_ids:
                 continue
             proposal_payload = _extract_memory_proposal_payload(content)
             if proposal_payload is None:
                 continue
+            if max_proposals_per_agent <= 0:
+                continue
+            current_count = proposal_counts_by_agent.get(source, 0)
+            if current_count >= max_proposals_per_agent:
+                continue
+            proposal_counts_by_agent[source] = current_count + 1
             proposal = self.proposal_builder.from_agent_output(
                 task_id=task_id,
                 agent_id=source,

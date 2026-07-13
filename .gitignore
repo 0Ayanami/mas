@@ -11,3 +11,4 @@ __pycache__/
 .pytest_cache/
 src/mas_framework/__pycache__/
 experiments/
+AgentLAB-main/

@@ -719,6 +719,75 @@ def test_tamas_consensus_ignores_outputs_without_memory_proposal_block():
     assert fake_mem0.items == []
 
 
+def test_tamas_limits_memory_proposals_per_agent_per_case():
+    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
+    fake_mem0 = FakeMem0()
+    runner = TAMASAutoGenRunner(
+        config=TAMASRunConfig(
+            mode="round_robin",
+            consensus_enabled=True,
+            verification_type="heuristic",
+            honest_model="honest-model",
+            byzantine_model="byzantine-model",
+            memory_user_id="shared-test-memory",
+            max_memory_proposals_per_agent_per_case=1,
+        ),
+        memory_backend=Mem0MemoryBackend(client=fake_mem0),
+        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
+    )
+    runner._build_agents(case)
+    fake_agents = [FakeVerificationAgent(agent_id) for agent_id in runner._agent_specs]
+    first_event = type(
+        "Event",
+        (),
+        {
+            "source": "news_gathering_agent_1",
+            "content": (
+                "First proposal.\n"
+                "MEMORY_PROPOSAL\n"
+                "```json\n"
+                "{\n"
+                '  "proposal_summary": "First proposal.",\n'
+                '  "observations": [{"type": "task_fact", "description": "First proposal.", "status": "complete"}]\n'
+                "}\n"
+                "```\n"
+                "END_MEMORY_PROPOSAL"
+            ),
+        },
+    )()
+    second_event = type(
+        "Event",
+        (),
+        {
+            "source": "news_gathering_agent_1",
+            "content": (
+                "Second proposal.\n"
+                "MEMORY_PROPOSAL\n"
+                "```json\n"
+                "{\n"
+                '  "proposal_summary": "Second proposal.",\n'
+                '  "observations": [{"type": "task_fact", "description": "Second proposal.", "status": "complete"}]\n'
+                "}\n"
+                "```\n"
+                "END_MEMORY_PROPOSAL"
+            ),
+        },
+    )()
+
+    decisions, proposals = runner._run_memory_consensus(
+        task_id="task-1",
+        task_description="Test proposal cap",
+        events=[first_event, second_event],
+        agents=fake_agents,
+        return_proposals=True,
+    )
+
+    assert len(proposals) == 1
+    assert len(decisions) == 1
+    assert proposals[0].header.proposal_summary == "First proposal."
+    assert len(fake_mem0.items) == 1
+
+
 def test_unified_config_selects_magentic_one_and_consensus():
     config = TAMASRunConfig.from_unified_config(
         "src/mas_framework/configs/experiment_configs/unified_config.yaml"
@@ -728,6 +797,7 @@ def test_unified_config_selects_magentic_one_and_consensus():
     assert config.consensus_enabled is True
     assert config.consensus_strategy == "smart_quorum"
     assert config.self_confidence_threshold == 0.6
+    assert config.max_memory_proposals_per_agent_per_case == 1
     assert config.honest_model in config.model_capability_coefficients
     assert config.byzantine_model in config.model_capability_coefficients
     assert config.model_capability_coefficients[config.honest_model] == config.capability_coefficient

@@ -18,7 +18,7 @@ agents:
 
 collaboration:
   mode: magentic_one
-  rounds: 50
+  rounds: 5
   max_tokens: 384
   options:
     use_agent_act: true
@@ -28,6 +28,7 @@ proposal:
   builder_enabled: true
   verification_enabled: true
   weight_manager_enabled: true
+  max_per_agent_per_case: 1
   verification:
     type: llm
     include_proposer_as_verifier: false
