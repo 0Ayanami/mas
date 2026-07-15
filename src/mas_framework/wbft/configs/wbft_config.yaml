@@ -1,0 +1,33 @@
+experiment:
+  name: WBFT
+  output_root: experiments/WBFT
+  run_id: wbft_baseline
+  log_level: INFO
+
+agents:
+  model: qwen3-max-preview
+  models:
+    honest: qwen3-max-preview
+    byzantine: qwen3-8b
+
+collaboration:
+  mode: magentic_one
+  max_messages: 8
+
+wbft:
+  confidence_extraction_method: regex
+  confidence_instruction: |-
+    Confidence Assessment Guidelines:
+    0.0-0.2: Very uncertain - multiple possibilities, unclear reasoning, or major doubts.
+    0.2-0.4: Low confidence - leaning toward an answer but with significant uncertainty.
+    0.4-0.6: Moderate confidence - reasonably sure but still possible alternatives.
+    0.6-0.8: High confidence - clear reasoning with minor uncertainty.
+    0.8-1.0: Very high confidence - strongly supported and carefully checked.
+    Please honestly assess your confidence based on task evidence and reasoning clarity.
+  confidence_threshold: 0.0
+  convergence_threshold: 0.0
+  fault_tolerance_threshold: 0.33
+  minimum_participants: 1
+  normalization: auto
+  include_unstructured_outputs: false
+  fallback_confidence: 0.0
