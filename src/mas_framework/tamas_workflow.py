@@ -5,6 +5,7 @@ import importlib
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -111,7 +112,7 @@ AGENT_TOOL_NAMES = {
 @dataclass(frozen=True)
 class TAMASRunConfig:
     mode: TAMASMode = "magentic_one"
-    max_messages: int = 50
+    max_messages: int = 10
     model: str | None = None
     honest_model: str | None = None
     byzantine_model: str | None = None
@@ -166,7 +167,7 @@ class TAMASRunConfig:
 
         return cls(
             mode=selected_mode,
-            max_messages=int(collaboration.get("max_messages", collaboration.get("rounds", 50))),
+            max_messages=int(collaboration.get("max_messages", 10)),
             model=default_model,
             honest_model=models.get("honest", default_model),
             byzantine_model=models.get("byzantine", default_model),
@@ -238,6 +239,7 @@ class TAMASRunResult:
     events: list[Any]
     consensus_decisions: list[Any] = field(default_factory=list)
     memory_proposals: list[Any] = field(default_factory=list)
+    run_metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def trace(self) -> str:
@@ -349,13 +351,24 @@ class TAMASAutoGenRunner:
         agents = self._build_agents(case)
         team = self._build_team(agents)
         events: list[Any] = []
+        case_started = time.perf_counter()
+        task_started = time.perf_counter()
         async for event in team.run_stream(task="Task: " + case["user query"]):
             events.append(event)
+        task_elapsed = time.perf_counter() - task_started
         result = TAMASRunResult(
             final_text=_final_text(events),
             events=events,
+            run_metrics={
+                "task_completion_seconds": task_elapsed,
+                "consensus_extra_seconds": 0.0,
+                "total_case_seconds": time.perf_counter() - case_started,
+                "interaction_message_count": _message_count(events),
+                "consensus_extra_message_count": 0,
+            },
         )
         if self.config.consensus_enabled:
+            consensus_started = time.perf_counter()
             consensus_decisions, memory_proposals = self._run_memory_consensus(
                 task_id=task_id,
                 task_description=case["user query"],
@@ -363,8 +376,19 @@ class TAMASAutoGenRunner:
                 agents=agents,
                 return_proposals=True,
             )
+            consensus_elapsed = time.perf_counter() - consensus_started
             result.consensus_decisions = consensus_decisions
             result.memory_proposals = memory_proposals
+            result.run_metrics.update(
+                {
+                    "consensus_extra_seconds": consensus_elapsed,
+                    "total_case_seconds": time.perf_counter() - case_started,
+                    "consensus_extra_message_count": _consensus_extra_message_count(
+                        memory_proposals=memory_proposals,
+                        consensus_decisions=consensus_decisions,
+                    ),
+                }
+            )
         return result
 
     def _build_agents(self, case: dict[str, Any]) -> list[AssistantAgent]:
@@ -728,6 +752,28 @@ def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _message_count(events: list[Any]) -> int:
+    return sum(
+        1
+        for event in events
+        if getattr(event, "source", None)
+        and isinstance(getattr(event, "content", None), str)
+    )
+
+
+def _consensus_extra_message_count(
+    *,
+    memory_proposals: list[Any],
+    consensus_decisions: list[Any],
+) -> int:
+    self_verification_calls = len(memory_proposals)
+    verifier_calls = sum(
+        len(getattr(decision, "votes", []) or [])
+        for decision in consensus_decisions
+    )
+    return self_verification_calls + verifier_calls
 
 
 __all__ = [

@@ -18,10 +18,7 @@ agents:
 
 collaboration:
   mode: magentic_one
-  rounds: 5
-  max_tokens: 384
-  options:
-    use_agent_act: true
+  max_messages: 8
 
 proposal:
   enabled: true

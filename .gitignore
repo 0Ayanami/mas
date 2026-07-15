@@ -6,9 +6,11 @@ tests
 examples
 .env
 __pycache__/
+src/mas_framework/consensus/__pycache__/
 *.pyc
 .agents/
 .pytest_cache/
 src/mas_framework/__pycache__/
 experiments/
 AgentLAB-main/
+Byzantine-Fault-Tolerance-in-LLM-MAS/

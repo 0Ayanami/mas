@@ -1,14 +1,5 @@
 """Consensus-memory multi-agent research framework."""
 
-from mas_framework.consensus import (
-    AgentWeightState,
-    AutoGenProposalEvaluator,
-    MajorityVoteConsensus,
-    SmartQuorumConsensus,
-    VerificationEngine,
-)
-from mas_framework.tamas_workflow import TAMASAutoGenRunner, TAMASRunConfig
-
 __all__ = [
     "AgentWeightState",
     "AutoGenProposalEvaluator",
@@ -18,3 +9,21 @@ __all__ = [
     "TAMASRunConfig",
     "VerificationEngine",
 ]
+
+
+def __getattr__(name):
+    if name in {
+        "AgentWeightState",
+        "AutoGenProposalEvaluator",
+        "MajorityVoteConsensus",
+        "SmartQuorumConsensus",
+        "VerificationEngine",
+    }:
+        from mas_framework import consensus
+
+        return getattr(consensus, name)
+    if name in {"TAMASAutoGenRunner", "TAMASRunConfig"}:
+        from mas_framework import tamas_workflow
+
+        return getattr(tamas_workflow, name)
+    raise AttributeError(f"module 'mas_framework' has no attribute {name!r}")
