@@ -5,17 +5,24 @@ experiment:
   log_level: INFO
 
 agents:
-  model: qwen3-max-preview
-  capability_coefficient: 8.4
+  model: qwen3.6-35b-a3b
+  capability_coefficient: 8.52
   models:
-    honest: qwen3-max-preview
-    byzantine: qwen3-8b
+    honest: qwen3.6-35b-a3b
+    byzantine: qwen3.6-35b-a3b
   model_capability_coefficients:
     qwen3.6-max-preview: 8.85
     qwen3-max-preview: 8.4
     qwen3-8b: 7.25
+    qwen3.6-35b-a3b: 8.52
+    qwen3.6-plus: 8.85
+    deepseek-v4-flash: 8.62
+    qwen3.6-27b: 8.62
   temperature: 0.0
 
+evaluator:
+  model: deepseek-v4-flash
+  
 collaboration:
   mode: magentic_one
   max_messages: 8

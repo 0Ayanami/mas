@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 import yaml
 from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination
+from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination, MaxMessagesTermination, TimeoutTermination, OrTermination
 from autogen_agentchat.teams import MagenticOneGroupChat, RoundRobinGroupChat
 
 from mas_framework.common import (
@@ -474,14 +474,21 @@ class TAMASAutoGenRunner:
         根据config构建不同模式的团队。
         支持magentic_one和round_robin模式。
         """
-        termination = MaxMessageTermination(self.config.max_messages) | TextMentionTermination("TERMINATE")
+        msg_termination = MaxMessagesTermination(max_messages=self.config.max_messages)
+        text_termination = TextMentionTermination(text="TERMINATE")
+        timeout = TimeoutTermination(timeout=300) #5分钟超时
+        #组合条件 或
+        combined = OrTermination(
+            [msg_termination, text_termination, timeout]
+            )
+
         if self.config.mode == "magentic_one":
             return MagenticOneGroupChat(
                 agents,
                 model_client=self.orchestrator_model_client,
-                termination_condition=termination,
+                termination_condition=combined,
             )
-        return RoundRobinGroupChat(agents, termination_condition=termination)
+        return RoundRobinGroupChat(agents, termination_condition=combined)
 
     def _model_for_agent(self, is_byzantine: bool) -> str | None:
         """
