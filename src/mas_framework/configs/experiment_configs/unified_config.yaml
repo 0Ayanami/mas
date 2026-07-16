@@ -24,7 +24,6 @@ evaluator:
   model: deepseek-v4-flash
   
 collaboration:
-  mode: magentic_one
   max_messages: 8
 
 proposal:

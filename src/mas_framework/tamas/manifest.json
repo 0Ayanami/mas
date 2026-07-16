@@ -1,112 +1,181 @@
 {
-    "name":  "tamas_3attack_5domain_2task_subset",
-    "description":  "Two TAMAS tasks per domain for Byzantine, Colluding, and Contradicting attack types.",
-    "source_root":  "TAMAS-main/data",
-    "tasks_per_attack_domain":  2,
-    "total_tasks":  30,
+    "name":  "tamas_swarm_experiment_subset",
+    "description":  "TAMAS subset for Swarm experiments: Byzantine clean base files plus Colluding/Contradicting 0-node and 2-node files.",
+    "source_root":  "src/mas_framework/tamas",
+    "total_source_tasks":  50,
     "files":  [
                   {
                       "attack_type":  "byzantine",
                       "domain":  "education",
-                      "source":  "TAMAS-main/data/Byzantine/education_byzantine.json",
-                      "path":  "src/mas_framework/tamas/byzantine/education_byzantine_2.json",
+                      "malicious_node_count":  null,
+                      "path":  "src/mas_framework/tamas/byzantine/education_byzantine.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "byzantine",
                       "domain":  "finance",
-                      "source":  "TAMAS-main/data/Byzantine/finance_byzantine.json",
-                      "path":  "src/mas_framework/tamas/byzantine/finance_byzantine_2.json",
+                      "malicious_node_count":  null,
+                      "path":  "src/mas_framework/tamas/byzantine/finance_byzantine.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "byzantine",
                       "domain":  "healthcare",
-                      "source":  "TAMAS-main/data/Byzantine/healthcare_byzantine.json",
-                      "path":  "src/mas_framework/tamas/byzantine/healthcare_byzantine_2.json",
+                      "malicious_node_count":  null,
+                      "path":  "src/mas_framework/tamas/byzantine/healthcare_byzantine.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "byzantine",
                       "domain":  "legal",
-                      "source":  "TAMAS-main/data/Byzantine/legal_byzantine.json",
-                      "path":  "src/mas_framework/tamas/byzantine/legal_byzantine_2.json",
+                      "malicious_node_count":  null,
+                      "path":  "src/mas_framework/tamas/byzantine/legal_byzantine.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "byzantine",
                       "domain":  "news",
-                      "source":  "TAMAS-main/data/Byzantine/news_byzantine.json",
-                      "path":  "src/mas_framework/tamas/byzantine/news_byzantine_2.json",
+                      "malicious_node_count":  null,
+                      "path":  "src/mas_framework/tamas/byzantine/news_byzantine.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "colluding",
                       "domain":  "education",
-                      "source":  "TAMAS-main/data/Colluding/education_colluding.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/colluding/education_colluding_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "colluding",
+                      "domain":  "education",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/colluding/education_colluding_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "colluding",
                       "domain":  "finance",
-                      "source":  "TAMAS-main/data/Colluding/finance_colluding.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/colluding/finance_colluding_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "colluding",
+                      "domain":  "finance",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/colluding/finance_colluding_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "colluding",
                       "domain":  "healthcare",
-                      "source":  "TAMAS-main/data/Colluding/healthcare_colluding.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/colluding/healthcare_colluding_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "colluding",
+                      "domain":  "healthcare",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/colluding/healthcare_colluding_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "colluding",
                       "domain":  "legal",
-                      "source":  "TAMAS-main/data/Colluding/legal_colluding.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/colluding/legal_colluding_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "colluding",
+                      "domain":  "legal",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/colluding/legal_colluding_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "colluding",
                       "domain":  "news",
-                      "source":  "TAMAS-main/data/Colluding/news_colluding.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/colluding/news_colluding_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "colluding",
+                      "domain":  "news",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/colluding/news_colluding_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "contradicting",
                       "domain":  "education",
-                      "source":  "TAMAS-main/data/Contradicting/education_contradicting.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/contradicting/education_contradicting_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "contradicting",
+                      "domain":  "education",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/contradicting/education_contradicting_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "contradicting",
                       "domain":  "finance",
-                      "source":  "TAMAS-main/data/Contradicting/finance_contradicting.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/contradicting/finance_contradicting_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "contradicting",
+                      "domain":  "finance",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/contradicting/finance_contradicting_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "contradicting",
                       "domain":  "healthcare",
-                      "source":  "TAMAS-main/data/Contradicting/healthcare_contradicting.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/contradicting/healthcare_contradicting_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "contradicting",
+                      "domain":  "healthcare",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/contradicting/healthcare_contradicting_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "contradicting",
                       "domain":  "legal",
-                      "source":  "TAMAS-main/data/Contradicting/legal_contradicting.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/contradicting/legal_contradicting_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "contradicting",
+                      "domain":  "legal",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/contradicting/legal_contradicting_2.json",
                       "count":  2
                   },
                   {
                       "attack_type":  "contradicting",
                       "domain":  "news",
-                      "source":  "TAMAS-main/data/Contradicting/news_contradinting.json",
+                      "malicious_node_count":  0,
+                      "path":  "src/mas_framework/tamas/contradicting/news_contradicting_0.json",
+                      "count":  2
+                  },
+                  {
+                      "attack_type":  "contradicting",
+                      "domain":  "news",
+                      "malicious_node_count":  2,
                       "path":  "src/mas_framework/tamas/contradicting/news_contradicting_2.json",
                       "count":  2
                   }

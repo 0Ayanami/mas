@@ -12,8 +12,8 @@ from typing import Any, Literal
 
 import yaml
 from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination, MaxMessagesTermination, TimeoutTermination, OrTermination
-from autogen_agentchat.teams import MagenticOneGroupChat, RoundRobinGroupChat
+from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermination, TimeoutTermination
+from autogen_agentchat.teams import Swarm
 
 from mas_framework.common import (
     _normalize_agent_name,
@@ -38,10 +38,8 @@ from mas_framework.consensus import (
     WeightManager,
 )
 from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
+from mas_framework.metrics import message_count, token_usage
 from mas_framework.tamas_data import load_tamas_dataset
-
-
-TAMASMode = Literal["round_robin", "magentic_one"]
 
 
 AGENT_TOOL_MODULES = {
@@ -111,7 +109,6 @@ AGENT_TOOL_NAMES = {
 
 @dataclass(frozen=True)
 class TAMASRunConfig:
-    mode: TAMASMode = "magentic_one"
     max_messages: int = 10
     model: str | None = None
     honest_model: str | None = None
@@ -161,12 +158,10 @@ class TAMASRunConfig:
         memory = payload.get("memory", {})
         weight_manager = proposal.get("weight_manager", {})
 
-        selected_mode = collaboration.get("mode", "magentic_one")
         models = agents.get("models", {})
         default_model = agents.get("model") or models.get("honest")
 
         return cls(
-            mode=selected_mode,
             max_messages=int(collaboration.get("max_messages", 10)),
             model=default_model,
             honest_model=models.get("honest", default_model),
@@ -301,9 +296,6 @@ class TAMASAutoGenRunner:
         self._model_clients: dict[str, Any] = {}
         self._agent_specs: dict[str, AgentRuntimeSpec] = {}
         self.weight_manager = self._build_weight_manager()
-        self.orchestrator_model_client = model_client or self._client_for_model(
-            self.config.honest_model or self.config.model
-        )
         self.proposal_builder = ProposalBuilder()
 
     def _build_weight_manager(self) -> WeightManager:
@@ -353,6 +345,7 @@ class TAMASAutoGenRunner:
         events: list[Any] = []
         case_started = time.perf_counter()
         task_started = time.perf_counter()
+        initial_weight_snapshots = self._weight_snapshots()
         async for event in team.run_stream(task="Task: " + case["user query"]):
             events.append(event)
         task_elapsed = time.perf_counter() - task_started
@@ -363,8 +356,11 @@ class TAMASAutoGenRunner:
                 "task_completion_seconds": task_elapsed,
                 "consensus_extra_seconds": 0.0,
                 "total_case_seconds": time.perf_counter() - case_started,
-                "interaction_message_count": _message_count(events),
+                "interaction_message_count": message_count(events),
                 "consensus_extra_message_count": 0,
+                "initial_weight_snapshots": initial_weight_snapshots,
+                "final_weight_snapshots": self._weight_snapshots(),
+                **token_usage(events=events, trace="", proposals=[]),
             },
         )
         if self.config.consensus_enabled:
@@ -387,16 +383,28 @@ class TAMASAutoGenRunner:
                         memory_proposals=memory_proposals,
                         consensus_decisions=consensus_decisions,
                     ),
+                    "final_weight_snapshots": self._weight_snapshots(),
+                    **token_usage(
+                        events=events,
+                        trace=result.trace,
+                        proposals=memory_proposals,
+                    ),
                 }
             )
+        else:
+            result.run_metrics.update(token_usage(events=events, trace=result.trace, proposals=[]))
         return result
 
     def _build_agents(self, case: dict[str, Any]) -> list[AssistantAgent]:
         agent_list: list[AssistantAgent] = []
         self._agent_specs = {}
+        agent_ids = [
+            _normalize_agent_name(f"{item['agent_name']}_{index}")
+            for index, item in enumerate(case["agents"], start=1)
+        ]
         for index, item in enumerate(case["agents"], start=1):
             display_name = item["agent_name"]
-            agent_id = _normalize_agent_name(f"{display_name}_{index}")
+            agent_id = agent_ids[index - 1]
 
             is_byzantine = self._is_byzantine_agent(item)
             model = self._model_for_agent(is_byzantine)
@@ -453,6 +461,7 @@ class TAMASAutoGenRunner:
                     description=display_name,
                     model_client=self._client_for_model(model),
                     tools=tools,
+                    handoffs=[target for target in agent_ids if target != agent_id],
                     system_message=system_message,
                 )
             )
@@ -470,25 +479,16 @@ class TAMASAutoGenRunner:
         )
 
     def _build_team(self, agents: list[AssistantAgent]) -> Any:
-        """
-        根据config构建不同模式的团队。
-        支持magentic_one和round_robin模式。
-        """
-        msg_termination = MaxMessagesTermination(max_messages=self.config.max_messages)
+        msg_termination = MaxMessageTermination(max_messages=self.config.max_messages)
         text_termination = TextMentionTermination(text="TERMINATE")
-        timeout = TimeoutTermination(timeout=300) #5分钟超时
-        #组合条件 或
-        combined = OrTermination(
-            [msg_termination, text_termination, timeout]
-            )
+        timeout = TimeoutTermination(timeout_seconds=300)
+        combined = msg_termination | text_termination | timeout
 
-        if self.config.mode == "magentic_one":
-            return MagenticOneGroupChat(
-                agents,
-                model_client=self.orchestrator_model_client,
-                termination_condition=combined,
-            )
-        return RoundRobinGroupChat(agents, termination_condition=combined)
+        return Swarm(
+            agents,
+            termination_condition=combined,
+            max_turns=self.config.max_messages,
+        )
 
     def _model_for_agent(self, is_byzantine: bool) -> str | None:
         """
@@ -730,6 +730,12 @@ class TAMASAutoGenRunner:
             use_dynamic_estimate=self.config.use_dynamic_estimate,
         )
 
+    def _weight_snapshots(self) -> dict[str, Any]:
+        return {
+            agent_id: self.weight_manager.snapshot(agent_id)
+            for agent_id in sorted(self._agent_specs)
+        }
+
 
 def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     marker = "MEMORY_PROPOSAL"
@@ -759,15 +765,6 @@ def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     return payload
-
-
-def _message_count(events: list[Any]) -> int:
-    return sum(
-        1
-        for event in events
-        if getattr(event, "source", None)
-        and isinstance(getattr(event, "content", None), str)
-    )
 
 
 def _consensus_extra_message_count(

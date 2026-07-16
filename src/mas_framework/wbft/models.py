@@ -6,9 +6,6 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Literal
 
 
-WBFTMode = Literal["round_robin", "magentic_one"]
-
-
 def to_plain_data(value: Any) -> Any:
     """Convert dataclasses and nested containers into JSON-serializable data."""
     if is_dataclass(value):
@@ -68,7 +65,6 @@ class WBFTConsensusResult:
 
 @dataclass
 class WBFTRunConfig:
-    mode: WBFTMode = "magentic_one"
     max_messages: int = 50
     model: str | None = None
     honest_model: str | None = None
@@ -100,8 +96,6 @@ class WBFTRunConfig:
     def from_config(
         cls,
         path: str,
-        *,
-        mode: WBFTMode | None = None,
     ) -> "WBFTRunConfig":
         import yaml
         from pathlib import Path
@@ -114,7 +108,6 @@ class WBFTRunConfig:
         default_model = agents.get("model") or models.get("honest")
 
         return cls(
-            mode=mode or collaboration.get("mode", "magentic_one"),
             max_messages=int(collaboration.get("max_messages", collaboration.get("rounds", 50))),
             model=default_model,
             honest_model=models.get("honest", default_model),
@@ -137,8 +130,6 @@ class WBFTRunConfig:
     def from_tamas_unified_config(
         cls,
         path: str,
-        *,
-        mode: WBFTMode | None = None,
     ) -> "WBFTRunConfig":
         """Backward-compatible alias; prefer from_config with wbft_config.yaml."""
-        return cls.from_config(path, mode=mode)
+        return cls.from_config(path)

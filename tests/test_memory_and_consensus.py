@@ -323,12 +323,11 @@ def test_tamas_workflow_reads_contradicting_agent_type_from_dataset():
     ]
 
 
-def test_tamas_runner_builds_round_robin_agents_without_memory_when_consensus_disabled():
+def test_tamas_runner_builds_swarm_agents_without_memory_when_consensus_disabled():
     case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
     fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=False,
             honest_model="honest-model",
             byzantine_model="byzantine-model",
@@ -352,7 +351,12 @@ def test_tamas_runner_builds_round_robin_agents_without_memory_when_consensus_di
         "article_writing_agent_3",
         "distribution_agent_4",
     ]
-    assert team.__class__.__name__ == "RoundRobinGroupChat"
+    assert team.__class__.__name__ == "Swarm"
+    assert all(
+        {handoff.target for handoff in getattr(agent, "_handoffs", {}).values()}
+        == {other.name for other in agents if other.name != agent.name}
+        for agent in agents
+    )
     assert runner._agent_specs["distribution_agent_4"].is_byzantine
     assert runner._agent_specs["distribution_agent_4"].model == "byzantine-model"
     assert runner._agent_specs["distribution_agent_4"].capability_coefficient == 2.0
@@ -363,7 +367,6 @@ def test_tamas_runner_adds_memory_tools_only_when_consensus_enabled():
     case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             honest_model="honest-model",
             byzantine_model="byzantine-model",
@@ -382,7 +385,6 @@ def test_tamas_runner_updates_weight_windows_after_consensus():
     case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             honest_model="honest-model",
             byzantine_model="byzantine-model",
@@ -450,7 +452,6 @@ def test_tamas_consensus_stores_accepted_proposal_once_in_shared_memory():
     fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             verification_type="llm",
             honest_model="honest-model",
@@ -559,7 +560,6 @@ def test_tamas_self_verification_gate_blocks_low_confidence_consensus():
     fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             verification_type="llm",
             honest_model="honest-model",
@@ -625,7 +625,6 @@ def test_tamas_self_verification_threshold_is_inclusive_and_excludes_proposer_vo
     fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             verification_type="llm",
             include_proposer_as_verifier=False,
@@ -693,7 +692,6 @@ def test_tamas_include_proposer_as_verifier_adds_self_vote_to_consensus():
     case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             verification_type="llm",
             include_proposer_as_verifier=True,
@@ -747,7 +745,6 @@ def test_tamas_consensus_ignores_outputs_without_memory_proposal_block():
     fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             verification_type="heuristic",
             honest_model="honest-model",
@@ -786,7 +783,6 @@ def test_tamas_limits_memory_proposals_per_agent_per_case():
     fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
         config=TAMASRunConfig(
-            mode="round_robin",
             consensus_enabled=True,
             verification_type="heuristic",
             honest_model="honest-model",
@@ -850,12 +846,12 @@ def test_tamas_limits_memory_proposals_per_agent_per_case():
     assert len(fake_mem0.items) == 1
 
 
-def test_unified_config_selects_magentic_one_and_consensus():
+def test_unified_config_has_no_team_mode_and_enables_consensus():
     config = TAMASRunConfig.from_unified_config(
         "src/mas_framework/configs/experiment_configs/unified_config.yaml"
     )
 
-    assert config.mode == "magentic_one"
+    assert not hasattr(config, "mode")
     assert config.consensus_enabled is True
     assert config.consensus_strategy == "smart_quorum"
     assert config.self_confidence_threshold == 0.6
@@ -863,4 +859,4 @@ def test_unified_config_selects_magentic_one_and_consensus():
     assert config.honest_model in config.model_capability_coefficients
     assert config.byzantine_model in config.model_capability_coefficients
     assert config.model_capability_coefficients[config.honest_model] == config.capability_coefficient
-    assert config.model_capability_coefficients[config.byzantine_model] == 7.25
+    assert config.model_capability_coefficients[config.byzantine_model] == config.capability_coefficient

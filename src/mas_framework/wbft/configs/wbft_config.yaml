@@ -11,7 +11,6 @@ agents:
     byzantine: qwen3-8b
 
 collaboration:
-  mode: magentic_one
   max_messages: 8
 
 wbft:

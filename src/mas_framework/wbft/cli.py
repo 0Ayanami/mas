@@ -21,12 +21,6 @@ def main() -> None:
         default="src/mas_framework/wbft/configs/wbft_config.yaml",
         help="WBFT-specific experiment config YAML.",
     )
-    parser.add_argument(
-        "--mode",
-        choices=["round_robin", "magentic_one"],
-        default=None,
-        help="AutoGen team workflow.",
-    )
     parser.add_argument("--limit", type=int, default=1, help="Number of cases to run.")
     parser.add_argument("--start-index", type=int, default=0, help="Dataset case index to start from.")
     parser.add_argument("--max-messages", type=int, default=None, help="Override AutoGen max messages.")
@@ -53,7 +47,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = WBFTRunConfig.from_config(args.config, mode=args.mode)
+    config = WBFTRunConfig.from_config(args.config)
     updates: dict[str, Any] = {}
     if args.model:
         updates["model"] = args.model

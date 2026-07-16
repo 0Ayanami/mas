@@ -9,7 +9,7 @@ from typing import Any
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination
-from autogen_agentchat.teams import MagenticOneGroupChat, RoundRobinGroupChat
+from autogen_agentchat.teams import Swarm
 
 from mas_framework.common import (
     _agent_outputs,
@@ -18,6 +18,7 @@ from mas_framework.common import (
     build_model_client,
     run_autogen_sync,
 )
+from mas_framework.metrics import message_count, token_usage
 from mas_framework.tamas_data import load_tamas_dataset
 from mas_framework.tamas_workflow import TAMASToolLoader
 from mas_framework.wbft.consensus import WBFTConsensus, parse_wbft_response
@@ -75,9 +76,6 @@ class WBFTRunner:
         self.model_client = model_client
         self._model_clients: dict[str, Any] = {}
         self._agent_specs: dict[str, WBFTAgentSpec] = {}
-        self.orchestrator_model_client = model_client or self._client_for_model(
-            self.config.honest_model or self.config.model
-        )
 
     def _client_for_model(self, model: str | None) -> Any:
         if self.model_client is not None:
@@ -149,19 +147,23 @@ class WBFTRunner:
             run_metrics={
                 "total_case_seconds": time.perf_counter() - case_started,
                 "consensus_extra_seconds": consensus_elapsed,
-                "interaction_message_count": _message_count(events),
+                "interaction_message_count": message_count(events),
                 "consensus_extra_message_count": 0,
                 "task_id": task_id,
-                "mode": self.config.mode,
+                **token_usage(events=events, trace=_trace(events), proposals=[]),
             },
         )
 
     def _build_agents(self, case: dict[str, Any]) -> list[AssistantAgent]:
         agent_list: list[AssistantAgent] = []
         self._agent_specs = {}
+        agent_ids = [
+            _normalize_agent_name(f"{item['agent_name']}_{index}")
+            for index, item in enumerate(case["agents"], start=1)
+        ]
         for index, item in enumerate(case["agents"], start=1):
             display_name = item["agent_name"]
-            agent_id = _normalize_agent_name(f"{display_name}_{index}")
+            agent_id = agent_ids[index - 1]
             is_byzantine = self._is_byzantine_agent(item)
             model = self._model_for_agent(is_byzantine)
             self._agent_specs[agent_id] = WBFTAgentSpec(
@@ -178,6 +180,7 @@ class WBFTRunner:
                     description=display_name,
                     model_client=self._client_for_model(model),
                     tools=self.tool_loader.tools_for_agent(display_name),
+                    handoffs=[target for target in agent_ids if target != agent_id],
                     system_message=system_message,
                 )
             )
@@ -187,13 +190,11 @@ class WBFTRunner:
         termination = MaxMessageTermination(self.config.max_messages) | TextMentionTermination(
             "TERMINATE"
         )
-        if self.config.mode == "magentic_one":
-            return MagenticOneGroupChat(
-                agents,
-                model_client=self.orchestrator_model_client,
-                termination_condition=termination,
-            )
-        return RoundRobinGroupChat(agents, termination_condition=termination)
+        return Swarm(
+            agents,
+            termination_condition=termination,
+            max_turns=self.config.max_messages,
+        )
 
     def _collect_agent_responses(
         self,
@@ -258,12 +259,11 @@ class WBFTRunner:
         )
 
 
-def _message_count(events: list[Any]) -> int:
-    total = 0
+def _trace(events: list[Any]) -> str:
+    parts: list[str] = []
     for event in events:
-        messages = getattr(event, "messages", None)
-        if messages:
-            total += len(messages)
-        elif getattr(event, "source", None) is not None:
-            total += 1
-    return total
+        source = getattr(event, "source", None)
+        content = getattr(event, "content", None)
+        if source and isinstance(content, str):
+            parts.append(f"{source}: {content}")
+    return "\n\n".join(parts)
