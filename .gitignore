@@ -14,3 +14,6 @@ src/mas_framework/__pycache__/
 experiments/
 AgentLAB-main/
 Byzantine-Fault-Tolerance-in-LLM-MAS/
+.crewai_appdata/
+.crewai_storage/
+.crewai_runtime/

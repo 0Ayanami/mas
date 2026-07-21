@@ -21,7 +21,7 @@ agents:
   temperature: 0.0
 
 evaluator:
-  model: deepseek-v4-flash
+  model: qwen3.6-27b
   
 collaboration:
   max_messages: 8
