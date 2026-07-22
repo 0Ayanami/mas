@@ -175,9 +175,27 @@ class WBFTConsensus:
             return " ".join(text.split()).lower()
         if self.normalization == "number":
             return self._first_number(text)
+        letter = self._first_letter_answer(text)
+        if letter is not None:
+            return letter
         if self._looks_numeric(text):
             return self._first_number(text)
         return " ".join(text.split()).lower()
+
+    def _first_letter_answer(self, text: str) -> str | None:
+        patterns = [
+            r"\bANSWER\s*[:=]\s*\(?\s*([A-J])\s*\)?",
+            r"FINAL_ANSWER\s*[:=]\s*([A-J])\b",
+            r"\bAnswer\s*[:=]\s*\(?\s*([A-J])\s*\)?",
+            r"\(([A-J])\)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+        if re.fullmatch(r"[A-Ja-j]", text.strip()):
+            return text.strip().upper()
+        return None
 
     def _first_number(self, text: str) -> str:
         numbers = re.findall(r"-?\d+\.?\d*", text)
@@ -309,6 +327,13 @@ def _extract_confidence(content: str) -> float | None:
 
 
 def _extract_answer(content: str) -> str | None:
+    letter_match = re.search(
+        r"\b(?:FINAL_ANSWER|ANSWER|Answer)\s*[:=]\s*\(?\s*([A-J])\s*\)?",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if letter_match:
+        return letter_match.group(1).upper()
     match = re.search(
         r"\bAnswer\s*[:=]\s*(.+?)(?:\n\s*(?:Confidence|Reasoning)\s*[:=]|\Z)",
         content,
