@@ -144,13 +144,22 @@ class ProposalBuilder:
             else KeyDecision(decision=decision, result="")
             if isinstance(decision, str)
             else KeyDecision(
-                decision=str(decision.get("decision", "")),
-                result=str(decision.get("result", "")),
+                decision=str(
+                    decision.get("decision", decision.get("decision_point", ""))
+                ),
+                result=str(
+                    decision.get(
+                        "result",
+                        decision.get("chosen_option", decision.get("rationale", "")),
+                    )
+                ),
             )
             for decision in thoughts.get("key_decisions", [])
         ]
         return ProposalThoughts(
-            thoughts_abstract=str(thoughts.get("thoughts_abstract", ""))[:500],
+            thoughts_abstract=str(
+                thoughts.get("thoughts_abstract", thoughts.get("reasoning_trajectory", ""))
+            )[:500],
             key_decisions=decisions,
         )
 
@@ -164,10 +173,10 @@ class ProposalBuilder:
             if isinstance(action, str)
             else ProposalAction(
                 action_id=action.get("action_id"),
-                type=str(action.get("type", "")),
-                tool=str(action.get("tool", "")),
-                params=dict(action.get("params", {})),
-                status=str(action.get("status", "")),
+                type=str(action.get("type", "agent_action")),
+                tool=str(action.get("tool", action.get("tool_name", ""))),
+                params=self._coerce_params(action),
+                status=str(action.get("status", action.get("outcome", ""))),
             )
             for action in actions
         ]
@@ -182,12 +191,22 @@ class ProposalBuilder:
             if isinstance(item, str)
             else ProposalDataReference(
                 source=str(item.get("source", "")),
-                content_snippet=str(item.get("content_snippet", "")),
+                content_snippet=str(item.get("content_snippet", item.get("content", ""))),
                 url=str(item.get("url", "")),
                 timestamp=str(item.get("timestamp", "")),
             )
             for item in data
         ]
+
+    def _coerce_params(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        params = action.get("params")
+        if isinstance(params, dict):
+            return params
+        if params is not None:
+            return {"params": params}
+        if "arguments" in action:
+            return {"arguments": action.get("arguments")}
+        return {}
 
     def _coerce_observations(
         self,
