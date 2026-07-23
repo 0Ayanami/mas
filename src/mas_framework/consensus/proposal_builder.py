@@ -16,7 +16,6 @@ from mas_framework.consensus.models import (
     ProposalObservation,
     ProposalThoughts,
     ProposalVerification,
-    SelfVerificationScores,
     canonical_json,
     utc_now_iso,
 )
@@ -54,9 +53,6 @@ class ProposalBuilder:
         observations: Optional[
             Iterable[Union[ProposalObservation, Dict[str, Any], str]]
         ] = None,
-        self_verification: Optional[
-            Union[SelfVerificationScores, Dict[str, float]]
-        ] = None,
         parent_proposals: Optional[Sequence[str]] = None,
         proposal_summary: Optional[str] = None,
         timestamp: Optional[str] = None,
@@ -87,9 +83,7 @@ class ProposalBuilder:
             body_hash=body_hash,
             proposal_summary=summary,
         )
-        verification = ProposalVerification(
-            self_verification=self._coerce_self_verification(self_verification)
-        )
+        verification = ProposalVerification()
         return MemoryProposal(header=header, body=body, verification=verification)
 
     def from_agent_output(
@@ -98,9 +92,6 @@ class ProposalBuilder:
         task_id: str,
         agent_id: str,
         output: Any,
-        self_verification: Optional[
-            Union[SelfVerificationScores, Dict[str, float]]
-        ] = None,
         proposal_summary: Optional[str] = None,
         parent_proposals: Optional[Sequence[str]] = None,
     ) -> MemoryProposal:
@@ -114,16 +105,14 @@ class ProposalBuilder:
                 data=output.get("data"),
                 observations=output.get("observations")
                 or [{"type": "agent_output", "description": str(output)}],
-                self_verification=self_verification,
-                parent_proposals=parent_proposals,
-                proposal_summary=proposal_summary or output.get("proposal_summary"),
+                parent_proposals=parent_proposals  or output.get("reference_proposals", []),
+                proposal_summary=proposal_summary or output.get("proposal_summary", ""),
             )
 
         return self.build(
             task_id=task_id,
             agent_id=agent_id,
             observations=[{"type": "agent_output", "description": str(output)}],
-            self_verification=self_verification,
             parent_proposals=parent_proposals,
             proposal_summary=proposal_summary,
         )
@@ -194,29 +183,19 @@ class ProposalBuilder:
         if isinstance(thoughts, ProposalThoughts):
             return thoughts
         if isinstance(thoughts, str):
-            return ProposalThoughts(thoughts_abstract=thoughts[:500])
+            return ProposalThoughts(reasoning_trajectory=thoughts[:500])
 
         decisions = [
             decision
             if isinstance(decision, KeyDecision)
-            else KeyDecision(decision=decision, result="")
-            if isinstance(decision, str)
-            else KeyDecision(
-                decision=str(
-                    decision.get("decision", decision.get("decision_point", ""))
-                ),
-                result=str(
-                    decision.get(
-                        "result",
-                        decision.get("chosen_option", decision.get("rationale", "")),
-                    )
-                ),
-            )
+            else KeyDecision(decision_point=decision.get("decision_point", ""), 
+                             chosen_option=decision.get("chosen_option", ""), 
+                             rationale=decision.get("rationale", ""))
             for decision in thoughts.get("key_decisions", [])
         ]
         return ProposalThoughts(
-            thoughts_abstract=str(
-                thoughts.get("thoughts_abstract", thoughts.get("reasoning_trajectory", ""))
+            reasoning_trajectory=str(
+                thoughts.get("reasoning_trajectory", "")
             )[:500],
             key_decisions=decisions,
         )
@@ -227,14 +206,11 @@ class ProposalBuilder:
         return [
             action
             if isinstance(action, ProposalAction)
-            else ProposalAction(type="agent_action", tool="", status=action)
-            if isinstance(action, str)
             else ProposalAction(
-                action_id=action.get("action_id"),
-                type=str(action.get("type", "agent_action")),
-                tool=str(action.get("tool", action.get("tool_name", ""))),
-                params=self._coerce_params(action),
-                status=str(action.get("status", action.get("outcome", ""))),
+                action_id=action.get("action_id", ""),
+                tool_name=str(action.get("tool_name", "")),
+                arguments=self._coerce_arguments(action),
+                outcome=str(action.get("outcome", "")),
             )
             for action in actions
         ]
@@ -245,25 +221,21 @@ class ProposalBuilder:
         return [
             item
             if isinstance(item, ProposalDataReference)
-            else ProposalDataReference(source="agent_output", content_snippet=item)
-            if isinstance(item, str)
             else ProposalDataReference(
-                source=str(item.get("source", "")),
-                content_snippet=str(item.get("content_snippet", item.get("content", ""))),
-                url=str(item.get("url", "")),
-                timestamp=str(item.get("timestamp", "")),
+                action_id=item.get("action_id", ""),
+                data_type=item.get("data_type", ""),
+                content=item.get("content", ""),
+                source=item.get("source", ""),
             )
             for item in data
         ]
 
-    def _coerce_params(self, action: Dict[str, Any]) -> Dict[str, Any]:
-        params = action.get("params")
-        if isinstance(params, dict):
-            return params
-        if params is not None:
-            return {"params": params}
-        if "arguments" in action:
-            return {"arguments": action.get("arguments")}
+    def _coerce_arguments(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        arguments = action.get("arguments")
+        if isinstance(arguments, dict):
+            return arguments
+        if arguments is not None:
+            return {"arguments": arguments}
         return {}
 
     def _coerce_observations(
@@ -274,39 +246,14 @@ class ProposalBuilder:
         for observation in observations:
             if isinstance(observation, ProposalObservation):
                 coerced.append(observation)
-            elif isinstance(observation, str):
-                coerced.append(
-                    ProposalObservation(type="agent_output", description=observation)
-                )
             else:
                 coerced.append(
                     ProposalObservation(
-                        type=str(observation.get("type", "")),
+                        observation_id=str(observation.get("observation_id", "")),
                         description=str(observation.get("description", "")),
-                        status=str(observation.get("status", "")),
                     )
                 )
         return coerced
-
-    def _coerce_self_verification(
-        self,
-        self_verification: Optional[Union[SelfVerificationScores, Dict[str, float]]],
-    ) -> SelfVerificationScores:
-        if isinstance(self_verification, SelfVerificationScores):
-            return self_verification
-        if not self_verification:
-            return SelfVerificationScores(
-                veracity_score=0,
-                rationality_score=0,
-                value_score=0,
-                security_score=0,
-            )
-        return SelfVerificationScores(
-            veracity_score=self_verification["veracity_score"],
-            rationality_score=self_verification["rationality_score"],
-            value_score=self_verification["value_score"],
-            security_score=self_verification["security_score"],
-        )
 
     def _summary_or_default(
         self, proposal_summary: Optional[str], body: MemoryProposalBody
@@ -316,9 +263,9 @@ class ProposalBuilder:
         if body.observations:
             return body.observations[0].description[:200]
         if body.data:
-            return body.data[0].content_snippet[:200]
+            return body.data[0].content[:200]
         if body.actions:
-            return f"{body.actions[0].type}:{body.actions[0].tool}"[:200]
+            return f"{body.actions[0].action_id}:{body.actions[0].tool_name}"[:200]
         if body.thoughts:
-            return body.thoughts.thoughts_abstract[:200]
+            return body.thoughts.reasoning_trajectory[:200]
         return "Memory proposal"

@@ -184,7 +184,7 @@ class TaskMemoryPool:
     def payloads(self) -> list[dict[str, Any]]:
         return [proposal.to_dict() for proposal in self.accepted_proposals]
 
-    def coordinator_message(self, *, decision: str) -> str:
+    def coordinator_message(self) -> str:
         if not self.accepted_proposals:
             return (
                 "Memory coordinator: the submitted proposal was not accepted."
@@ -192,8 +192,8 @@ class TaskMemoryPool:
             )
         entries = self.payloads()
         return (
-            "Memory coordinator: consensus accepted the latest proposal "
-            f"(decision={decision}). The following is the task-scoped shared memory. "
+            "Memory coordinator: the following task-scoped memory proposals "
+            "have passed consensus and may be used as shared context for this task only. "
             "Treat it as verified context, cite it by proposal_id when useful, and continue solving.\n"
             f"SHARED_TASK_MEMORY\n{json.dumps(entries, ensure_ascii=False)}\nEND_SHARED_TASK_MEMORY"
         )

@@ -393,7 +393,8 @@ class Exp1Runner:
                 "Only then request a structured Memory Proposal. "
                 "Do not request one for routine speculation, duplicated information, or merely your final answer."
                 "When needed, emit exactly the following request and a one-sentence reason: \n"
-                "MEMORY_PROPOSAL_REQUEST\n<why this ReAct cycle is reusable>\n"
+                "MEMORY_PROPOSAL_REQUEST\n"
+                "<why this ReAct cycle is reusable>\n"
                 "END_MEMORY_PROPOSAL_REQUEST\n"
                 "The coordinator will then ask you through a dedicated prompt to construct the JSON proposal,"
                 "verify it with the other agents, and resume the group chat."
@@ -540,9 +541,7 @@ class Exp1Runner:
                 )
                 next_task = TextMessage(
                     source="memory_coordinator",
-                    content=pool.coordinator_message(
-                        decision=proposal["_experiment"].get("consensus_result") or "rejected"
-                    ),
+                    content=pool.coordinator_message(),
                 )
 
             return events, decisions, proposals, []

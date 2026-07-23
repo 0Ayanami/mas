@@ -62,42 +62,42 @@ def _validate_binary(name: str, value: int) -> int:
 
 @dataclass(frozen=True)
 class KeyDecision:
-    decision: str
-    result: str
+    decision_point: str
+    chosen_option: str
+    rationale: str
 
 
 @dataclass(frozen=True)
 class ProposalThoughts:
-    thoughts_abstract: str = ""
+    reasoning_trajectory: str = ""
     key_decisions: List[KeyDecision] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if len(self.thoughts_abstract) > 500:
-            raise ValueError("thoughts_abstract must be 500 characters or less.")
+        if len(self.reasoning_trajectory) > 500:
+            raise ValueError("reasoning trajectory must be 500 characters or less.")
 
 
 @dataclass(frozen=True)
 class ProposalAction:
-    type: str
-    tool: str = ""
-    params: Dict[str, Any] = field(default_factory=dict)
-    status: str = ""
     action_id: Optional[str] = None
+    tool_name: str = ""
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    outcome: str = ""
+    
 
 
 @dataclass(frozen=True)
 class ProposalDataReference:
-    source: str
-    content_snippet: str
-    url: str = ""
-    timestamp: str = ""
+    action_id: Optional[str] = None
+    data_type: str
+    content: str = ""
+    source: str = ""
 
 
 @dataclass(frozen=True)
 class ProposalObservation:
-    type: str
+    observation_id: str
     description: str
-    status: str = ""
 
 
 @dataclass(frozen=True)

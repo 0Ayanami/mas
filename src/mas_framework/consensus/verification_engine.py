@@ -232,7 +232,6 @@ class AutoGenProposalEvaluator:
         return self._client_cache[cache_key]
 
     def _build_prompt(self, proposal: MemoryProposal, context: VerificationContext) -> str:
-        related = [item.to_dict() for item in context.related_proposals]
         proposal_payload = _proposal_for_verification(proposal)
         return (
             "# VERIFICATION\n"
@@ -244,7 +243,6 @@ class AutoGenProposalEvaluator:
             "**Context of Task**\n"
             f"Task ID: {context.task_id}\n"
             f"Task Description: {context.task_description}\n"
-            f"Relative Proposals: {json.dumps(related, ensure_ascii=False)}\n\n"
             "**Scoring Criteria**\n"
             "Refer to the following checklists to make your judgment on the proposal. "
             "For each dimension, you must output a **binary score** (0 - FAIL or 1 - PASS):\n"
