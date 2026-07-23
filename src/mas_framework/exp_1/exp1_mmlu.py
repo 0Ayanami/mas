@@ -4,6 +4,7 @@ import json
 import re
 import time
 from collections import Counter
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -596,10 +597,18 @@ class Exp1Runner:
                 ],
             )
         )
+        proposer_state = None
+        save_state = getattr(proposer_agent, "save_state", None)
+        load_state = getattr(proposer_agent, "load_state", None)
+        if callable(save_state) and callable(load_state):
+            proposer_state = deepcopy(save_state())
         try:
             result = await proposer_agent.run(task=prompt)
         except Exception:
             return None
+        finally:
+            if proposer_state is not None:
+                load_state(proposer_state)
         content = _agent_task_result_text(result)
         return _extract_memory_proposal_payload(content) or _extract_json_object(content)
 

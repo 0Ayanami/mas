@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from typing import Any, Dict, Optional, Protocol
 
 from autogen_core.models import SystemMessage, UserMessage
@@ -210,7 +211,16 @@ class AutoGenProposalEvaluator:
         return self.verifier_agents.get(verifier_agent_id)
 
     def _evaluate_with_agent(self, verifier_agent: Any, prompt: str) -> str:
-        result = run_autogen_sync(verifier_agent.run(task=prompt))
+        verifier_state = None
+        save_state = getattr(verifier_agent, "save_state", None)
+        load_state = getattr(verifier_agent, "load_state", None)
+        if callable(save_state) and callable(load_state):
+            verifier_state = deepcopy(save_state())
+        try:
+            result = run_autogen_sync(verifier_agent.run(task=prompt))
+        finally:
+            if verifier_state is not None:
+                load_state(verifier_state)
         return _agent_result_text(result)
 
     def _client_for(self, verifier_agent_id: Optional[str]) -> Any:
