@@ -141,11 +141,6 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         proposal_confidence_score = (
             self._weighted_confidence(votes) if passed else 0.0
         )
-        consensus_result = ConsensusResult(
-            total_weight=total_weight,
-            vote_weight=accept_weight,
-            result="pass" if passed else "fail",
-        )
 
         return ConsensusDecision(
             proposal_id=proposal.proposal_id,
@@ -169,7 +164,6 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),
                 "multi_verification_summary": multi_verification,
-                "consensus_result": consensus_result.to_dict(),
                 **quorum,
             },
         )

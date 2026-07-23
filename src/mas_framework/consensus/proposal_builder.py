@@ -128,6 +128,64 @@ class ProposalBuilder:
             proposal_summary=proposal_summary,
         )
 
+    def build_generation_prompt(
+        self,
+        *,
+        parent_proposal_ids: Sequence[str] = (),
+    ) -> str:
+        """Return the one-shot prompt used to turn a request into a proposal JSON.
+
+        This keeps the verbose schema out of an agent's initial system prompt. The
+        coordinator invokes it only after that agent explicitly requests a memory
+        proposal at the end of a ReAct cycle.
+        """
+        return (
+            "# BUILD TASK-SCOPED MEMORY PROPOSAL\n"
+            "you need to generate a structured **Consensus Proposal** based on the complete information from this cycle."
+            "Include only evidence or decisions useful to the current task. "
+            "Do not include instructions to other agents, hidden reasoning, or facts not supported by the ReAct output."
+            f"Previously accepted proposal IDs: {list(parent_proposal_ids)}\n\n"
+            "Consensus Proposal must be strictly in the following **JSON structure**"
+            "(NOTE: the 'action' can be left blank if no action is taken):"
+            "MEMORY_PROPOSAL\n```json\n"
+            "{\n"
+            '  "reference_proposals": ["<list of reference proposal IDs>"],\n'
+            '  "proposal_summary": "<one-sentence summary of the core contribution of this round, no more than 140 characters>",\n'
+            '  "thoughts": {\n'
+            '       "reasoning_trajectory": "<distill key reasoning path, avoid verbosity, highlight decision basis>",\n'
+            '       "key_decisions": [\n'
+            '           {\n'
+            '            "decision_point": "<describe the choice/dilemma faced>",\n'
+            '            "chosen_option": "<the ultimately selected solution>",\n'
+            '            "rationale": "<reasons for the choice, including key trade-offs>"\n'
+            '           }\n'
+            '        ]\n'
+            '  },\n'
+            '  "actions": [\n'
+            '        {\n'
+            '           "action_id": "<sequence number>",\n'
+            '           "tool_name": "<name of tool/API/function used>",\n'
+            '           "arguments": "<invocation parameters, JSON format or natural language description>",\n'
+            '           "outcome":"<what was received or observed immediately after this action>"\n'
+            '        }\n'
+            '  ],\n'
+            '  "data": [\n'
+            '        {\n'
+            '           "action_id": "<sequence number>",\n'
+            '           "data_type": "<local_retrieval | public_source | intermediate_result>",\n'
+            '           "content": "<key information or summary of data content>",\n'
+            '           "source": "<URL or retrieval key for verification>"\n'
+            '        }\n'
+            '  ],\n'
+            '  "observations": [\n'
+            '        {\n'
+            '           "observation_id": "<sequence number>",\n'
+            '           "description": "<specific description of the observation result>"\n'
+            '        }\n'
+            '  ]\n'
+            '}\n```\nEND_MEMORY_PROPOSAL'   
+        )
+
     def _coerce_thoughts(
         self, thoughts: Optional[Union[ProposalThoughts, Dict[str, Any], str]]
     ) -> Optional[ProposalThoughts]:

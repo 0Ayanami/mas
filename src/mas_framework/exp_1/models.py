@@ -3,6 +3,9 @@ from typing import Any, Iterable, Literal
 from pathlib import Path
 import yaml
 import json
+import re
+
+DEFAULT_MMLU_PRO_SAMPLE_PATH = Path("src/mas_framework/mmlu/mmlu_pro_13x3_seed42.json")
 
 Exp1Method = Literal[
     "discussion_based",
@@ -15,8 +18,6 @@ ModelRegime = Literal[
     "strong_byzantine_weak_honest",
 ]
 
-
-
 @dataclass(frozen=True)
 class MMLUProQuestion:
     question_id: str
@@ -28,6 +29,9 @@ class MMLUProQuestion:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+    @property
+    def task(self) -> str:
+        return format_qa_task(self.question, self.options)
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,7 @@ class Exp1Config:
     category_count: int = 13
     samples_per_category: int = 3
     methods: list[str] = field(default_factory=list)
-    group_specs: list[Exp1GroupSpec] = field(default_factory=list)
+    group_spec: Exp1GroupSpec
     default_model: str = "qwen3.6-35b-a3b"
     honest_model: str = "qwen3.6-35b-a3b"
     byzantine_model: str = "qwen3.6-35b-a3b"
@@ -94,7 +98,7 @@ class Exp1Config:
         default_model = str(agents.get("default_model", "qwen3.6-35b-a3b"))
         default_capability = agents.get("capability_coefficient")
         proposal_cfg = dict(payload.get("proposal", {}))
-        group_specs = build_group_matrix(payload)
+        group = dict(payload.get("group", {}))
         return cls(
             config_path=str(config_path),
             output_root=str(experiment.get("output_root", "experiments/exp1_mmlu_pro")),
@@ -104,7 +108,7 @@ class Exp1Config:
             category_count=int(dataset.get("categories_per_sample", 13)),
             samples_per_category=int(dataset.get("samples_per_category", 3)),
             methods=[str(item) for item in payload.get("methods", [])],
-            group_specs=group_specs,
+            group_spec=build_group_spec(group),
             default_model=default_model,
             honest_model=str(agent_models.get("honest", default_model)),
             byzantine_model=str(agent_models.get("byzantine", default_model)),
@@ -194,21 +198,103 @@ class TaskMemoryPool:
             f"SHARED_TASK_MEMORY\n{json.dumps(entries, ensure_ascii=False)}\nEND_SHARED_TASK_MEMORY"
         )
 
+def load_mmlu_pro_questions(
+    path: str | Path = DEFAULT_MMLU_PRO_SAMPLE_PATH,
+) -> list[MMLUProQuestion]:
+    dataset_path = Path(path)
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            f"MMLU-Pro sample path does not exist: {dataset_path}. "
+            "Use src/mas_framework/mmlu/mmlu_pro_13x3_seed42.json "
+            "or pass --dataset-path explicitly."
+    )
+    records = _read_dataset_records(dataset_path)
+    return [_normalize_mmlu_record(record, index) for index, record in enumerate(records)]
 
-def build_group_matrix(config_payload: dict[str, Any]) -> list[Exp1GroupSpec]:
-    methods = [str(item) for item in config_payload.get("methods", [])]
-    specs: list[Exp1GroupSpec] = []
-    for group in config_payload.get("groups", []):
-        n = int(group["n"])
-        for f_value in group.get("f_values", []):
-            for regime in group.get("model_regimes", ["same"]):
-                for method in methods:
-                    specs.append(
-                        Exp1GroupSpec(
-                            method=method,
-                            n=n,
-                            f=int(f_value),
-                            model_regime=str(regime),
-                        )
-                    )
-    return specs
+
+def build_group_spec(group: dict[str, Any]) -> Exp1GroupSpec:
+    method = group.get("method", "discussion_based")
+    n = int(group.get("n", 3))
+    f = int(group.get("f_value", 0))
+    model_regime = group.get("model_regime", "same")
+    return Exp1GroupSpec(method=method, n=n, f=f, model_regime=model_regime)
+
+def format_qa_task(question: str, options: list[str]) -> str:
+    opts = "\n".join(
+        f"{chr(ord('A') + index)}. {option}"
+        for index, option in enumerate(options)
+    )
+    return (
+        "Answer the following multiple-choice question.\n"
+        f"Question: {question}\n"
+        f"Options:\n{opts}\n\n"
+        "Return the final answer exactly as ANSWER:(<LETTER>)."
+    )
+
+def _read_dataset_records(path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    records = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or not records:
+        raise ValueError(f"No MMLU-Pro records found in {path}.")
+    return records
+
+
+def _normalize_mmlu_record(record: dict[str, Any], index: int) -> MMLUProQuestion:
+    question_id = str(record["question_id"])
+    category = str(record["category"])
+    question = str(record["question"])
+    options_value = record["options"]
+    if not isinstance(options_value, list):
+        raise ValueError(f"Cannot normalize MMLU-Pro record at index {index}: {record}")
+    options = [str(option) for option in options_value]
+    answer = str(record["answer"]).strip().upper()
+    if not question or not options or not re.fullmatch(r"[A-J]", answer):
+        raise ValueError(f"Cannot normalize MMLU-Pro record at index {index}: {record}")
+    return MMLUProQuestion(
+        question_id=_slug(question_id),
+        category=category,
+        question=question,
+        options=options,
+        answer=answer,
+        raw=dict(record["raw"]),
+    )
+
+def _slug(value: Any) -> str:
+    text = str(value).strip().lower()
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in text)
+    return "_".join(part for part in normalized.split("_") if part) or "item"
+
+def _model_result_text(result: Any) -> str:
+    content = getattr(result, "content", result)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(item) for item in content)
+    return str(content)
+
+def _loads_json_object(candidate: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+        repaired = repaired.replace('""data"', '"data"')
+        try:
+            payload = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+def _extract_json_object(content: str) -> dict[str, Any] | None:
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, flags=re.DOTALL)
+    candidate = (
+        fenced.group(1)
+        if fenced
+        else content[content.find("{") : content.rfind("}") + 1]
+    )
+    if not candidate or not candidate.startswith("{"):
+        return None
+    payload = _loads_json_object(candidate)
+    if payload is None:
+        return None
+    return payload if isinstance(payload, dict) else None
+
