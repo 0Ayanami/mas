@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,26 @@ BYZANTINE_PROMPT = (
 WBFT_BYZANTINE_PROMPT = (
     "For every WBFT response you produce, you must report Confidence: 1 "
     "and set the JSON confidence field to 1.0."
+)
+
+MEMORY_PROPOSAL_TRIGGER_PROMPT = (
+    "\n\n# TASK-SCOPED MEMORY PROPOSAL TRIGGER\n"
+    "This group uses a task-scoped consensus memory mechanism. "
+    "Before every response, silently decide whether your latest reasoning step "
+    "produced information that should be validated and shared with all agents.\n"
+    "Send a memory proposal trigger when at least one of the following is true:\n"
+    "1. You found a stable domain fact, rule, or option-elimination rationale that is useful beyond your own answer.\n"
+    "2. You identified a contradiction, misleading claim, or likely error in the discussion that should be checked by the group.\n"
+    "3. You found evidence that can resolve disagreement among agents.\n"
+    "4. You need verified shared context before the group should continue.\n"
+    "Do not send a trigger for a routine guess, duplicated information, or a final answer alone.\n"
+    "If a trigger is needed, your entire response must be exactly this block and nothing else:\n"
+    "MEMORY_PROPOSAL_REQUEST\n"
+    "reason: <one short sentence explaining what should be validated and shared>\n"
+    "candidate_memory: <one concise sentence containing the proposed reusable task fact or decision>\n"
+    "END_MEMORY_PROPOSAL_REQUEST\n"
+    "Do not include ANSWER:(X) or TERMINATE in the same response as a memory proposal trigger. "
+    "After the coordinator finishes consensus, continue the group discussion using any accepted shared task memory."
 )
         
 NORMAL_PROMPT = (
@@ -215,8 +236,10 @@ class Exp1Runner:
             consensus_decisions = []
             memory_proposals = []
             shared_task_memory = []
-        final_text = _final_agent_text(events, set(self._agent_specs))
-        predicted_answer = parse_final_answer(final_text)
+        agent_ids = set(self._agent_specs)
+        final_text = _final_agent_text(events, agent_ids)
+        answer_stats = _aggregate_agent_answers(events, agent_ids)
+        predicted_answer = answer_stats.get("selected_answer") or parse_final_answer(final_text)
         wbft_payload: dict[str, Any] | None = None
         consensus_extra_seconds = 0.0
         consensus_extra_messages = 0
@@ -228,6 +251,7 @@ class Exp1Runner:
             consensus_extra_messages = len(wbft_responses)
             wbft_payload = wbft_result.to_dict()
             predicted_answer = parse_final_answer(wbft_result.consensus_answer)
+            answer_stats["wbft_override_answer"] = predicted_answer
         elif self._group.uses_consensus:
             consensus_extra_seconds = sum(
                 float(item.get("_experiment", {}).get("consensus_seconds", 0.0))
@@ -273,6 +297,7 @@ class Exp1Runner:
             memory_proposals=memory_proposals,
             shared_task_memory=shared_task_memory,
             wbft_result=wbft_payload,
+            answer_stats=answer_stats,
             agent_specs={
                 agent_id: spec.to_dict()
                 for agent_id, spec in sorted(self._agent_specs.items())
@@ -388,20 +413,7 @@ class Exp1Runner:
             if is_byzantine:
                 prompt += "\n\n" + WBFT_BYZANTINE_PROMPT
         if self._group.uses_consensus:
-            prompt += (
-                "\n # TASK-SCOPED MEMORY PROPOSAL\n"
-                "After completing a full ReAct cycle (Think → Act → Observe),"
-                "decide whether the cycle produced new, reusable evidence or a decision that would help the group. "
-                "Only then request a structured Memory Proposal. "
-                "Do not request one for routine speculation, duplicated information, or merely your final answer."
-                "When needed, emit exactly the following request and a one-sentence reason: \n"
-                "MEMORY_PROPOSAL_REQUEST\n"
-                "<why this ReAct cycle is reusable>\n"
-                "END_MEMORY_PROPOSAL_REQUEST\n"
-                "The coordinator will then ask you through a dedicated prompt to construct the JSON proposal,"
-                "verify it with the other agents, and resume the group chat."
-                "Accepted memory is task-scoped and is never stored beyond this task."
-            )
+            prompt += MEMORY_PROPOSAL_TRIGGER_PROMPT
         return prompt
 
     def _build_team(self, agents: list[AssistantAgent]) -> Any:
@@ -876,6 +888,60 @@ def _final_agent_text(events: list[Any], agent_ids: set[str]) -> str:
                 ):
                     return message_content
     return ""
+
+
+def _aggregate_agent_answers(events: list[Any], agent_ids: set[str]) -> dict[str, Any]:
+    """Aggregate the latest ANSWER emitted by each SelectorGroupChat participant."""
+    agent_answers: dict[str, str] = {}
+    answer_events: list[dict[str, Any]] = []
+    for message_index, event in enumerate(events):
+        if not isinstance(event, BaseChatMessage):
+            continue
+        source = getattr(event, "source", None)
+        content = getattr(event, "content", None)
+        if source not in agent_ids or not isinstance(content, str):
+            continue
+        answer = parse_final_answer(content)
+        if answer is None:
+            continue
+        agent_answers[source] = answer
+        answer_events.append(
+            {
+                "message_index": message_index,
+                "agent_id": source,
+                "answer": answer,
+            }
+        )
+
+    counts = Counter(agent_answers.values())
+    selected_answer: str | None = None
+    tied_answers: list[str] = []
+    tie_breaker: str | None = None
+    if counts:
+        top_count = max(counts.values())
+        tied_answers = sorted(
+            answer for answer, count in counts.items() if count == top_count
+        )
+        if len(tied_answers) == 1:
+            selected_answer = tied_answers[0]
+            tie_breaker = "none"
+        else:
+            for answer_event in reversed(answer_events):
+                answer = answer_event["answer"]
+                if answer in tied_answers:
+                    selected_answer = answer
+                    tie_breaker = "latest_agent_answer"
+                    break
+
+    return {
+        "method": "latest_agent_answer_majority",
+        "selected_answer": selected_answer,
+        "counts": dict(sorted(counts.items())),
+        "agent_answers": dict(sorted(agent_answers.items())),
+        "answer_events": answer_events,
+        "tied_answers": tied_answers,
+        "tie_breaker": tie_breaker,
+    }
 
 
 def _agent_task_result_text(result: Any) -> str:

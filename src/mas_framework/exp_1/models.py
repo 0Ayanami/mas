@@ -64,6 +64,7 @@ class Exp1GroupSpec:
 @dataclass(frozen=True)
 class Exp1Config:
     config_path: str
+    group_spec: Exp1GroupSpec
     output_root: str = "experiments/exp1_mmlu_pro"
     run_id: str = "exp1_mmlu_pro"
     seed: int = 42
@@ -71,7 +72,6 @@ class Exp1Config:
     category_count: int = 13
     samples_per_category: int = 3
     methods: list[str] = field(default_factory=list)
-    group_spec: Exp1GroupSpec
     default_model: str = "qwen3.6-35b-a3b"
     honest_model: str = "qwen3.6-35b-a3b"
     byzantine_model: str = "qwen3.6-35b-a3b"
@@ -152,6 +152,7 @@ class Exp1CaseResult:
     consensus_decisions: list[dict[str, Any]] = field(default_factory=list)
     memory_proposals: list[dict[str, Any]] = field(default_factory=list)
     shared_task_memory: list[dict[str, Any]] = field(default_factory=list)
+    answer_stats: dict[str, Any] = field(default_factory=dict)
     wbft_result: dict[str, Any] | None = None
 
     def to_case_json(self) -> dict[str, Any]:
@@ -164,6 +165,7 @@ class Exp1CaseResult:
             "final_text": self.final_text,
             "metrics": self.metrics,
             "agent_specs": self.agent_specs,
+            "answer_stats": self.answer_stats,
             "proposal_count": len(self.memory_proposals),
             "shared_task_memory": self.shared_task_memory,
             "shared_task_memory_count": len(self.shared_task_memory),

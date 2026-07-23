@@ -88,8 +88,8 @@ class ProposalAction:
 
 @dataclass(frozen=True)
 class ProposalDataReference:
-    action_id: Optional[str] = None
     data_type: str
+    action_id: Optional[str] = None
     content: str = ""
     source: str = ""
 

@@ -15,7 +15,6 @@ from mas_framework.consensus.models import (
     ProposalObservation,
     ProposalThoughts,
     ProposalVerification,
-    SelfVerificationScores,
     VerificationContext,
     VerificationVector,
 )
@@ -56,7 +55,6 @@ __all__ = [
     "ProposalObservation",
     "ProposalThoughts",
     "ProposalVerification",
-    "SelfVerificationScores",
     "SignatureProvider",
     "SmartQuorumConsensus",
     "SmartQuorumPolicy",

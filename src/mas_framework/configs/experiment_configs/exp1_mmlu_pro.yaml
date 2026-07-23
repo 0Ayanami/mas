@@ -23,25 +23,19 @@ agents:
     qwen3.6-plus: 8.85
   
 collaboration:
-  mode: discussion_based
   allow_repeat_speaker: false
   max_messages: 6
   timeout_seconds: 300
   request_timeout_seconds: 120
   model_api_max_retries: 2
 
-memory:
-  provider: task_scoped_consensus_pool
-  persistence: none
-
 group:
-  method: discussion_based
+  method: discussion_based_consensus
   n: 3
   f_value: 1
   model_regime: same
 
 proposal:
-  enabled: true
   builder_enabled: true
   verification_enabled: true
   weight_manager_enabled: true
