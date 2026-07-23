@@ -37,7 +37,7 @@ memory:
 group:
   method: discussion_based
   n: 3
-  f_value: 0
+  f_value: 1
   model_regime: same
 
 proposal:
