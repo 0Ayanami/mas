@@ -115,34 +115,6 @@ class MemoryProposalBody:
             and not self.observations
         )
 
-
-@dataclass(frozen=True)
-class SelfVerificationScores:
-    veracity_score: float
-    rationality_score: float
-    value_score: float
-    security_score: float
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "veracity_score",
-            _validate_score("veracity_score", self.veracity_score),
-        )
-        object.__setattr__(
-            self,
-            "rationality_score",
-            _validate_score("rationality_score", self.rationality_score),
-        )
-        object.__setattr__(
-            self, "value_score", _validate_score("value_score", self.value_score)
-        )
-        object.__setattr__(
-            self,
-            "security_score",
-            _validate_score("security_score", self.security_score),
-        )
-
 @dataclass(frozen=True)
 class MultiVerificationSummary:
     weighted_scores: Dict[str, float] = field(default_factory=dict)
@@ -175,7 +147,6 @@ class ConsensusResult:
 
 @dataclass(frozen=True)
 class ProposalVerification:
-    self_verification: SelfVerificationScores
     multi_verification: Optional[MultiVerificationSummary] = None
     consensus_result: Optional[ConsensusResult] = None
 

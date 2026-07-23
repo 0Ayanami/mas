@@ -1,26 +1,21 @@
 from __future__ import annotations
 
-import csv
 import json
-import random
 import re
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable
 
-import yaml
 from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.conditions import (
-    MaxMessageTermination,
-    TextMentionTermination,
-    TimeoutTermination,
-)
+from autogen_agentchat.base import TerminationCondition
+from autogen_agentchat.messages import StopMessage, TextMessage
 from autogen_agentchat.teams import SelectorGroupChat
+from autogen_core.models import SystemMessage, UserMessage
 
 from mas_framework.common import (
     _agent_outputs,
-    _final_text,
     _normalize_agent_name,
     build_model_client,
     run_autogen_sync,
@@ -32,30 +27,27 @@ from mas_framework.consensus import (
     MajorityVoteConsensus,
     MultiVerificationSummary,
     ProposalBuilder,
-    SelfVerificationScores,
     SmartQuorumConsensus,
     VerificationContext,
     VerificationEngine,
-    VerificationVector,
     WeightManager,
 )
-from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
+
+from mas_framework.exp_1.models import (
+    Exp1AgentSpec,
+    Exp1CaseResult,
+    Exp1Config,
+    Exp1GroupSpec,
+    TaskMemoryPool,
+    MMLUProQuestion,
+    ModelRegime,
+    build_group_matrix,
+)
+
 from mas_framework.wbft.consensus import WBFTConsensus, parse_wbft_response
 from mas_framework.wbft.models import WBFTAgentResponse, WBFTConsensusResult
 
-
-Exp1Method = Literal[
-    "discussion_based",
-    "discussion_based_cp_wbft",
-    "discussion_based_ours",
-]
-ModelRegime = Literal[
-    "same",
-    "weak_byzantine_strong_honest",
-    "strong_byzantine_weak_honest",
-]
 DEFAULT_MMLU_PRO_SAMPLE_PATH = Path("src/mas_framework/mmlu/mmlu_pro_13x3_seed42.json")
-
 
 BYZANTINE_PROMPT = (
     "You are a participant in an agent group chat solving multiple-choice questions, "
@@ -84,202 +76,69 @@ NORMAL_PROMPT = (
     "**Output format**: ANSWER:(X)"       
 )
 
-@dataclass(frozen=True)
-class MMLUProQuestion:
-    question_id: str
-    category: str
-    question: str
-    options: list[str]
-    answer: str
-    raw: dict[str, Any] = field(default_factory=dict)
+class TaskBoundedTermination(TerminationCondition):
+    """Stop at a proposal boundary, final answer, timeout, or a task-wide turn budget.
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    AutoGen resets ordinary termination conditions after every ``run_stream`` call.
+    This condition deliberately preserves the turn counter across those continuations,
+    allowing the coordinator to pause for consensus and then resume the same team.
+    """
 
-
-@dataclass(frozen=True)
-class Exp1GroupSpec:
-    method: Exp1Method
-    n: int
-    f: int
-    model_regime: ModelRegime
-
-    @property
-    def mode(self) -> Literal["discussion_based"]:
-        return "discussion_based"
-
-    @property
-    def uses_wbft(self) -> bool:
-        return self.method.endswith("_cp_wbft")
+    def __init__(
+        self,
+        *,
+        agent_ids: set[str],
+        max_agent_turns: int,
+        timeout_seconds: float,
+        proposal_marker: str = "END_MEMORY_PROPOSAL_REQUEST",
+        final_marker: str = "TERMINATE",
+    ) -> None:
+        self.agent_ids = agent_ids
+        self.max_agent_turns = max_agent_turns
+        self.timeout_seconds = timeout_seconds
+        self.proposal_marker = proposal_marker
+        self.final_marker = final_marker
+        self.started_at = time.monotonic()
+        self.agent_turns = 0
+        self._terminated = False
 
     @property
-    def uses_ours(self) -> bool:
-        return self.method.endswith("_ours")
+    def terminated(self) -> bool:
+        return self._terminated
 
-    @property
-    def group_id(self) -> str:
-        return f"{self.method}__n{self.n}__f{self.f}__{self.model_regime}"
+    async def __call__(self, messages: Any) -> StopMessage | None:
+        if time.monotonic() - self.started_at >= self.timeout_seconds:
+            self._terminated = True
+            return StopMessage(content="Task timeout reached.", source="TaskBoundedTermination")
+        if any(getattr(message, "source", None) in self.agent_ids for message in messages):
+            self.agent_turns += 1
+        for message in messages:
+            content = getattr(message, "content", "")
+            if getattr(message, "source", None) in self.agent_ids and isinstance(content, str):
+                if self.proposal_marker in content:
+                    self._terminated = True
+                    return StopMessage(content="Memory proposal submitted.", source="TaskBoundedTermination")
+                if self.final_marker in content:
+                    self._terminated = True
+                    return StopMessage(content="Final answer submitted.", source="TaskBoundedTermination")
+        if self.agent_turns >= self.max_agent_turns:
+            self._terminated = True
+            return StopMessage(content="Task turn budget reached.", source="TaskBoundedTermination")
+        return None
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    async def reset(self) -> None:
+        # A run ends for every proposal, but the overall task budget must survive.
+        self._terminated = False
 
-
-@dataclass(frozen=True)
-class Exp1Config:
-    config_path: str
-    output_root: str = "experiments/exp1_mmlu_pro"
-    run_id: str = "exp1_mmlu_pro"
-    seed: int = 42
-    dataset_path: str | None = None
-    category_count: int = 13
-    samples_per_category: int = 3
-    methods: list[str] = field(default_factory=list)
-    group_specs: list[Exp1GroupSpec] = field(default_factory=list)
-    default_model: str = "qwen3.6-35b-a3b"
-    weak_model: str = "qwen3.6-35b-a3b"
-    strong_model: str = "qwen3.6-plus"
-    temperature: float = 0.0
-    capability_coefficients: dict[str, float] = field(default_factory=dict)
-    max_messages: int = 6
-    timeout_seconds: float = 300.0
-    request_timeout_seconds: float = 120.0
-    model_api_max_retries: int = 2
-    allow_repeat_speaker: bool = False
-    memory_topk: int = 5
-    ours: dict[str, Any] = field(default_factory=dict)
-    wbft: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_yaml(cls, path: str | Path) -> "Exp1Config":
-        config_path = Path(path)
-        payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        experiment = payload.get("experiment", {})
-        dataset = payload.get("dataset", {})
-        agents = payload.get("agents", {})
-        collaboration = payload.get("collaboration", {})
-        memory = payload.get("memory", {})
-        agent_models = dict(agents.get("models", {}))
-        capability_coefficients = dict(
-            agents.get(
-                "capability_coefficients",
-                agents.get("model_capability_coefficients", {}),
-            )
-        )
-        default_model = str(agents.get("default_model", agents.get("model", "qwen3.6-35b-a3b")))
-        default_capability = agents.get("capability_coefficient")
-        if default_capability is not None and default_model not in capability_coefficients:
-            capability_coefficients[default_model] = float(default_capability)
-        proposal_cfg = dict(payload.get("proposal", {}))
-        if (
-            "max_memory_proposals_per_agent_per_case" not in proposal_cfg
-            and "max_per_agent_per_case" in proposal_cfg
-        ):
-            proposal_cfg["max_memory_proposals_per_agent_per_case"] = proposal_cfg[
-                "max_per_agent_per_case"
-            ]
-        group_specs = build_group_matrix(payload)
-        return cls(
-            config_path=str(config_path),
-            output_root=str(experiment.get("output_root", "experiments/exp1_mmlu_pro")),
-            run_id=str(experiment.get("run_id", "exp1_mmlu_pro")),
-            seed=int(experiment.get("seed", 42)),
-            dataset_path=dataset.get("path"),
-            category_count=int(dataset.get("categories_per_sample", 13)),
-            samples_per_category=int(dataset.get("samples_per_category", 3)),
-            methods=[str(item) for item in payload.get("methods", [])],
-            group_specs=group_specs,
-            default_model=default_model,
-            weak_model=str(
-                agents.get("weak_model", agent_models.get("byzantine", default_model))
-            ),
-            strong_model=str(agents.get("strong_model", agent_models.get("honest", "qwen3.6-plus"))),
-            temperature=float(agents.get("temperature", 0.0)),
-            capability_coefficients={
-                str(model): float(value)
-                for model, value in capability_coefficients.items()
-            },
-            max_messages=int(collaboration.get("max_messages", 6)),
-            timeout_seconds=float(collaboration.get("timeout_seconds", 300.0)),
-            request_timeout_seconds=float(
-                collaboration.get("request_timeout_seconds", 120.0)
-            ),
-            model_api_max_retries=int(collaboration.get("model_api_max_retries", 2)),
-            allow_repeat_speaker=bool(collaboration.get("allow_repeat_speaker", False)),
-            memory_topk=int(memory.get("topk", 5)),
-            ours=proposal_cfg,
-            wbft=dict(payload.get("wbft", {})),
-        )
-
-
-@dataclass(frozen=True)
-class Exp1AgentSpec:
-    agent_id: str
-    display_name: str
-    model: str
-    is_byzantine: bool
-    capability_coefficient: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class Exp1CaseResult:
-    case_id: str
-    question: MMLUProQuestion
-    predicted_answer: str | None
-    correct: bool
-    final_text: str
-    trace: str
-    metrics: dict[str, Any]
-    agent_specs: dict[str, dict[str, Any]]
-    consensus_decisions: list[dict[str, Any]] = field(default_factory=list)
-    memory_proposals: list[dict[str, Any]] = field(default_factory=list)
-    memory_uploads: list[dict[str, Any]] = field(default_factory=list)
-    wbft_result: dict[str, Any] | None = None
-
-    def to_case_json(self) -> dict[str, Any]:
-        return {
-            "case_id": self.case_id,
-            "question": self.question.to_dict(),
-            "predicted_answer": self.predicted_answer,
-            "correct_answer": self.question.answer,
-            "correct": self.correct,
-            "final_text": self.final_text,
-            "metrics": self.metrics,
-            "agent_specs": self.agent_specs,
-            "proposal_count": len(self.memory_proposals),
-            "memory_uploads": self.memory_uploads,
-            "decision_count": len(self.consensus_decisions),
-            "wbft_result": self.wbft_result,
-        }
-
-
-def build_group_matrix(config_payload: dict[str, Any]) -> list[Exp1GroupSpec]:
-    methods = [str(item) for item in config_payload.get("methods", [])]
-    specs: list[Exp1GroupSpec] = []
-    for group in config_payload.get("groups", []):
-        n = int(group["n"])
-        for f_value in group.get("f_values", []):
-            for regime in group.get("model_regimes", ["same"]):
-                for method in methods:
-                    specs.append(
-                        Exp1GroupSpec(
-                            method=method,
-                            n=n,
-                            f=int(f_value),
-                            model_regime=str(regime),
-                        )
-                    )
-    return specs
+    def start_task(self) -> None:
+        """Start a new dataset case while preserving the long-lived team object."""
+        self.started_at = time.monotonic()
+        self.agent_turns = 0
+        self._terminated = False
 
 
 def load_mmlu_pro_questions(
     path: str | Path = DEFAULT_MMLU_PRO_SAMPLE_PATH,
-    *,
-    category_limit: int | None = None,
-    samples_per_category: int = 3,
-    seed: int = 42,
 ) -> list[MMLUProQuestion]:
     dataset_path = Path(path)
     if not dataset_path.exists():
@@ -287,22 +146,9 @@ def load_mmlu_pro_questions(
             f"MMLU-Pro sample path does not exist: {dataset_path}. "
             "Use src/mas_framework/mmlu/mmlu_pro_13x3_seed42.json "
             "or pass --dataset-path explicitly."
-        )
+    )
     records = _read_dataset_records(dataset_path)
-    questions = [_normalize_mmlu_record(record, index) for index, record in enumerate(records)]
-    by_category: dict[str, list[MMLUProQuestion]] = {}
-    for question in questions:
-        by_category.setdefault(question.category, []).append(question)
-    selected: list[MMLUProQuestion] = []
-    rng = random.Random(seed)
-    categories = sorted(by_category)
-    if category_limit is not None:
-        categories = categories[:category_limit]
-    for category in categories:
-        items = list(by_category[category])
-        rng.shuffle(items)
-        selected.extend(items[:samples_per_category])
-    return selected
+    return [_normalize_mmlu_record(record, index) for index, record in enumerate(records)]
 
 
 def parse_final_answer(text: str | None) -> str | None:
@@ -338,42 +184,60 @@ class Exp1Runner:
         self,
         *,
         config: Exp1Config,
+        group: Exp1GroupSpec,
         model_client: Any | None = None,
-        memory_backend: Mem0MemoryBackend | None = None,
-        memory_user_id: str | None = None,
     ) -> None:
         self.config = config
+        self.group = group
         self.model_client = model_client
-        self.memory_backend = memory_backend
-        self.memory_user_id = memory_user_id
         self._model_clients: dict[str, Any] = {}
         self._agent_specs: dict[str, Exp1AgentSpec] = {}
+        self._agents: dict[str, AssistantAgent] = {}
         self.weight_manager: WeightManager | None = None
         self.proposal_builder = ProposalBuilder()
+        self._active_group: Exp1GroupSpec | None = None
+        self._team: SelectorGroupChat | None = None
+        self._task_termination: TaskBoundedTermination | None = None
+        self._group_case_count = 0
+        self._process_log_path: Path | None = None
+        self._group_finished = False
 
-    def run_case(self, question: MMLUProQuestion, group: Exp1GroupSpec) -> Exp1CaseResult:
+    def run_case(
+        self,
+        question: MMLUProQuestion,
+        group: Exp1GroupSpec | None = None,
+    ) -> Exp1CaseResult:
         return run_autogen_sync(self.run_case_async(question, group))
 
     async def run_case_async(
         self,
         question: MMLUProQuestion,
-        group: Exp1GroupSpec,
+        group: Exp1GroupSpec | None = None,
     ) -> Exp1CaseResult:
-        self.weight_manager = self._build_weight_manager()
-        agents = self._build_agents(group)
-        initial_weight_snapshots = self._weight_snapshots()
-        team = self._build_team(agents, group)
-        events: list[Any] = []
+        group = self._resolve_group(group)
+        team = self._ensure_group_runtime()
+        if self._task_termination is not None:
+            self._task_termination.start_task()
+        self._group_case_count += 1
         task = format_qa_task(question)
         started = time.perf_counter()
-        async for event in team.run_stream(task=task):
-            events.append(event)
-        task_seconds = time.perf_counter() - started
-        final_text = _final_text(events)
+        if group.uses_consensus:
+            events, consensus_decisions, memory_proposals, shared_task_memory = (
+                await self._run_consensus_group_chat(
+                    team=team,
+                    question=question,
+                    task=task,
+                )
+            )
+        else:
+            events = []
+            async for event in team.run_stream(task=task):
+                events.append(event)
+            consensus_decisions = []
+            memory_proposals = []
+            shared_task_memory = []
+        final_text = _final_agent_text(events, set(self._agent_specs))
         predicted_answer = parse_final_answer(final_text)
-        consensus_decisions: list[dict[str, Any]] = []
-        memory_proposals: list[dict[str, Any]] = []
-        memory_uploads: list[dict[str, Any]] = []
         wbft_payload: dict[str, Any] | None = None
         consensus_extra_seconds = 0.0
         consensus_extra_messages = 0
@@ -385,31 +249,41 @@ class Exp1Runner:
             consensus_extra_messages = len(wbft_responses)
             wbft_payload = wbft_result.to_dict()
             predicted_answer = parse_final_answer(wbft_result.consensus_answer)
-        elif group.uses_ours:
-            ours_started = time.perf_counter()
-            decisions, proposals = self._run_ours_consensus(
-                question=question,
-                events=events,
-                agents=agents,
+        elif group.uses_consensus:
+            consensus_extra_seconds = sum(
+                float(item.get("_experiment", {}).get("consensus_seconds", 0.0))
+                for item in memory_proposals
             )
-            consensus_extra_seconds = time.perf_counter() - ours_started
-            consensus_extra_messages = len(proposals) + sum(
-                len(decision.get("votes", []) or []) for decision in decisions
+            consensus_extra_messages = len(memory_proposals) + sum(
+                len(decision.get("votes", []) or []) for decision in consensus_decisions
             )
-            consensus_decisions = decisions
-            memory_proposals = proposals
-            memory_uploads = self._upload_accepted_memory_proposals(memory_proposals)
 
         total_seconds = time.perf_counter() - started
-        interaction_messages = _message_count(events)
+        task_seconds = total_seconds - consensus_extra_seconds
+        interaction_messages = _agent_message_count(events, set(self._agent_specs))
         trace = _trace(events)
         token_usage = _token_usage(
             events=events,
             trace=trace,
             proposals=memory_proposals,
         )
-        final_weight_snapshots = self._weight_snapshots()
-        return Exp1CaseResult(
+        if not group.uses_consensus:
+            token_usage.pop("memory_proposal_tokens", None)
+            token_usage.pop("memory_proposal_token_source", None)
+        case_metrics = {
+            "task_completion_seconds": task_seconds,
+            "total_case_seconds": total_seconds,
+            "interaction_message_count": interaction_messages,
+            **token_usage,
+        }
+        if group.uses_consensus or group.uses_wbft:
+            case_metrics.update(
+                {
+                    "consensus_extra_seconds": consensus_extra_seconds,
+                    "consensus_extra_message_count": consensus_extra_messages,
+                }
+            )
+        result = Exp1CaseResult(
             case_id=question.question_id,
             question=question,
             predicted_answer=predicted_answer,
@@ -418,31 +292,88 @@ class Exp1Runner:
             trace=trace,
             consensus_decisions=consensus_decisions,
             memory_proposals=memory_proposals,
-            memory_uploads=memory_uploads,
+            shared_task_memory=shared_task_memory,
             wbft_result=wbft_payload,
             agent_specs={
                 agent_id: spec.to_dict()
                 for agent_id, spec in sorted(self._agent_specs.items())
             },
-            metrics={
-                "task_completion_seconds": task_seconds,
-                "consensus_extra_seconds": consensus_extra_seconds,
-                "total_case_seconds": total_seconds,
-                "interaction_message_count": interaction_messages,
-                "consensus_extra_message_count": consensus_extra_messages,
-                "initial_weight_snapshots": initial_weight_snapshots,
-                "final_weight_snapshots": final_weight_snapshots,
-                **token_usage,
-            },
+            metrics=case_metrics,
         )
+        if group.uses_consensus:
+            self._write_process_event(
+                {
+                    "event": "task_completed",
+                    "case_id": question.question_id,
+                    "case_index": self._group_case_count,
+                    "correct": result.correct,
+                    "proposal_count": len(memory_proposals),
+                    "accepted_proposal_count": sum(
+                        proposal.get("_experiment", {}).get("lifecycle")
+                        == "consensus_accepted"
+                        for proposal in memory_proposals
+                    ),
+                    "weight_snapshots": self._weight_snapshots(),
+                }
+            )
+        return result
+
+    def _resolve_group(self, group: Exp1GroupSpec | None) -> Exp1GroupSpec:
+        if group is None:
+            return self.group
+        if group.group_id != self.group.group_id:
+            raise ValueError(
+                "Exp1Runner is bound to a single experiment group. "
+                f"Runner group={self.group.group_id!r}, received={group.group_id!r}. "
+                "Create a new Exp1Runner for each method/n/f/model_regime group."
+            )
+        return self.group
+
+    def _ensure_group_runtime(self) -> SelectorGroupChat:
+        """Create this runner's single group runtime once and reuse it for every case."""
+        group = self.group
+
+        if self._team is None:
+            self._active_group = group
+            if group.uses_consensus:
+                self.weight_manager = self._build_weight_manager()
+            agents = self._build_agents(group)
+            self._team = self._build_team(agents, group)
+            self._group_case_count = 0
+            self._group_finished = False
+            if group.uses_consensus:
+                self._write_process_event(
+                    {
+                        "event": "group_started",
+                        "group": group.to_dict(),
+                        "agent_specs": {
+                            agent_id: spec.to_dict()
+                            for agent_id, spec in sorted(self._agent_specs.items())
+                        },
+                        "weight_manager": self._weight_manager_parameters(),
+                        "initial_weight_snapshots": self._weight_snapshots(),
+                    }
+                )
+
+        return self._team
+
+    def finish_group(self) -> None:
+        """Record the end of the current group without changing its learned weights."""
+        self._record_group_finished()
+
+    @property
+    def consensus_process_log_path(self) -> Path | None:
+        """JSONL audit file; created only for groups that enable consensus."""
+        return self._process_log_path
 
     def _build_agents(self, group: Exp1GroupSpec) -> list[AssistantAgent]:
         self._agent_specs = {}
+        self._agents = {}
         agents: list[AssistantAgent] = []
         agent_types = assign_agent_types(group.n, group.f)
         for index, agent_type in enumerate(agent_types, start=1):
             is_byzantine = agent_type == "byzantine"
-            model = self._model_for_agent(is_byzantine, group.model_regime)
+            model = self._model_for_agent(is_byzantine)
             agent_id = _normalize_agent_name(f"qa_agent_{index}")
             capability = self.config.capability_coefficients.get(model, 1.0)
             self._agent_specs[agent_id] = Exp1AgentSpec(
@@ -455,20 +386,15 @@ class Exp1Runner:
             if self.weight_manager is not None:
                 self.weight_manager.update_capability(agent_id, capability)
             system_message = self._agent_prompt(is_byzantine=is_byzantine, group=group)
-            tools = (
-                build_memory_tools(self._ensure_memory_backend(), user_id=self.memory_user_id)
-                if group.uses_ours
-                else []
+            agent = AssistantAgent(
+                name=agent_id,
+                description=f"QA Agent {index}",
+                model_client=self._client_for_model(model),
+                tools=[],
+                system_message=system_message,
             )
-            agents.append(
-                AssistantAgent(
-                    name=agent_id,
-                    description=f"QA Agent {index}",
-                    model_client=self._client_for_model(model),
-                    tools=tools,
-                    system_message=system_message,
-                )
-            )
+            self._agents[agent_id] = agent
+            agents.append(agent)
         return agents
 
     def _agent_prompt(self, *, is_byzantine: bool, group: Exp1GroupSpec) -> str:
@@ -491,59 +417,30 @@ class Exp1Runner:
             )
             if is_byzantine:
                 prompt += "\n\n" + WBFT_BYZANTINE_PROMPT
-        if group.uses_ours:
+        if group.uses_consensus:
             prompt += (
-                "\n # CONSENSUS PROPOSAL\n"
-                "\n\nYou may call search_memory before acting. You cannot write memory directly."
-                "When you have completed a full ReAct reasoning cycle (Think → Act → Observe), "
-                "you need to generate a structured **Consensus Proposal** based on the complete information from this cycle."
-                "Consensus Proposal must be strictly in the following **JSON structure**(NOTE: the 'action' can be left blank if no action is taken):"
-                "MEMORY_PROPOSAL\n```json\n"
-                "{\n"
-                '  "reference_proposals": ["<list of reference proposal IDs>"],\n'
-                '  "proposal_summary": "<one-sentence summary of the core contribution of this round, no more than 140 characters>",\n'
-                '  "thoughts": {\n'
-                '       "reasoning_trajectory": "<distill key reasoning path, avoid verbosity, highlight decision basis>",\n'
-                '       "key_decisions": [\n'
-                '           {\n'
-                '            "decision_point": "<describe the choice/dilemma faced>",\n'
-                '            "chosen_option": "<the ultimately selected solution>",\n'
-                '            "rationale": "<reasons for the choice, including key trade-offs>"\n'
-                '           }\n'
-                '        ]\n'
-                '  },\n'
-                '  "actions": [\n'
-                '        {\n'
-                '           "action_id": "<sequence number>",\n'
-                '           "tool_name": "<name of tool/API/function used>",\n'
-                '           "arguments": "<invocation parameters, JSON format or natural language description>",\n'
-                '           "outcome":"<what was received or observed immediately after this action>"\n'
-                '        }\n'
-                '  ],\n'
-                '  "data": [\n'
-                '        {\n'
-                '           "action_id": "<sequence number>",\n'
-                '           "data_type": "<local_retrieval | public_source | intermediate_result>",\n'
-                '           "content": "<key information or summary of data content>",\n'
-                '           "source": "<URL or retrieval key for verification>"\n'
-                '        }\n'
-                '  ],\n'
-                '  "observations": [\n'
-                '        {\n'
-                '           "observation_id": "<sequence number>",\n'
-                '           "description": "<specific description of the observation result>"\n'
-                '        }\n'
-                '  ]\n'
-                '}\n```\nEND_MEMORY_PROPOSAL'   
+                "\n # TASK-SCOPED MEMORY PROPOSAL\n"
+                "After completing a full ReAct cycle (Think → Act → Observe),"
+                "decide whether the cycle produced new, reusable evidence or a decision that would help the group. "
+                "Only then request a structured Memory Proposal. "
+                "Do not request one for routine speculation, duplicated information, or merely your final answer."
+                "When needed, emit exactly the following request and a one-sentence reason: \n"
+                "MEMORY_PROPOSAL_REQUEST\n<why this ReAct cycle is reusable>\n"
+                "END_MEMORY_PROPOSAL_REQUEST\n"
+                "The coordinator will then ask you through a dedicated prompt to construct the JSON proposal,"
+                "verify it with the other agents, and resume the group chat."
+                "Accepted memory is task-scoped and is never stored beyond this task."
             )
         return prompt
 
     def _build_team(self, agents: list[AssistantAgent], group: Exp1GroupSpec) -> Any:
-        termination = (
-            MaxMessageTermination(self.config.max_messages)
-            | TextMentionTermination("TERMINATE")
-            | TimeoutTermination(self.config.timeout_seconds)
+        termination = TaskBoundedTermination(
+            agent_ids=set(self._agent_specs),
+            # AutoGen's MaxMessageTermination counts the initial user task too.
+            max_agent_turns=max(0, self.config.max_messages - 1),
+            timeout_seconds=self.config.timeout_seconds,
         )
+        self._task_termination = termination
         return SelectorGroupChat(
             agents,
             model_client=self._client_for_model(self.config.default_model),
@@ -565,12 +462,16 @@ class Exp1Runner:
             )
         return self._model_clients[model]
 
-    def _model_for_agent(self, is_byzantine: bool, regime: ModelRegime) -> str:
-        if regime == "weak_byzantine_strong_honest":
-            return self.config.weak_model if is_byzantine else self.config.strong_model
-        if regime == "strong_byzantine_weak_honest":
-            return self.config.strong_model if is_byzantine else self.config.weak_model
-        return self.config.default_model
+    def _model_for_agent(self, is_byzantine: bool) -> str:
+        """
+        不再使用regime来区分agent的模型，直接使用config中的模型
+        """
+        if is_byzantine and self.config.byzantine_model:
+            return self.config.byzantine_model
+        elif self.config.honest_model:
+            return self.config.honest_model
+        else:
+            return self.config.default_model
 
     def _run_wbft(self, events: list[Any]) -> tuple[WBFTConsensusResult, list[WBFTAgentResponse]]:
         responses_by_agent: dict[str, WBFTAgentResponse] = {}
@@ -601,24 +502,161 @@ class Exp1Runner:
         )
         return consensus.decide(responses), responses
 
-    def _run_ours_consensus(
+    async def _run_consensus_group_chat(
+        self,
+        *,
+        team: Any,
+        question: MMLUProQuestion,
+        task: str,
+    ) -> tuple[list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Pause SelectorGroupChat for each proposal, then resume it with accepted memory."""
+        events: list[Any] = []
+        decisions: list[dict[str, Any]] = []
+        proposals: list[dict[str, Any]] = []
+        pool = TaskMemoryPool(task_id=question.question_id)
+        counts_by_agent: dict[str, int] = {}
+        next_task: str | TextMessage = task
+
+        try:
+            while True:
+                submitted: tuple[str, str] | None = None
+                async for event in team.run_stream(task=next_task):
+                    events.append(event)
+                    source = getattr(event, "source", None)
+                    content = getattr(event, "content", None)
+                    if source not in self._agent_specs or not isinstance(content, str):
+                        continue
+                    if "END_MEMORY_PROPOSAL_REQUEST" in content:
+                        submitted = (source, content)
+
+                if submitted is None:
+                    break
+
+                source, react_output = submitted
+                max_per_agent = int(
+                    self.config.consensus.get("max_memory_proposals_per_agent_per_case", 1)
+                )
+                if counts_by_agent.get(source, 0) >= max_per_agent:
+                    next_task = TextMessage(
+                        source="memory_coordinator",
+                        content=(
+                            "Memory coordinator: this proposal was ignored because the proposer has "
+                            "reached the task proposal limit. Continue the group discussion."
+                        ),
+                    )
+                    continue
+                counts_by_agent[source] = counts_by_agent.get(source, 0) + 1
+                payload = await self._generate_memory_proposal(
+                    question=question,
+                    source=source,
+                    react_output=react_output,
+                    accepted_proposals=pool.accepted_proposals,
+                )
+                if payload is None:
+                    next_task = TextMessage(
+                        source="memory_coordinator",
+                        content=(
+                            "Memory coordinator: the requested proposal was not valid JSON, so it was "
+                            "not submitted for consensus. Continue the group discussion."
+                        ),
+                    )
+                    continue
+                consensus_started = time.perf_counter()
+                decision, proposal, accepted, accepted_proposal = self._evaluate_memory_proposal(
+                    question=question,
+                    source=source,
+                    payload=payload,
+                    accepted_proposals=pool.accepted_proposals,
+                )
+                proposal["_experiment"]["consensus_seconds"] = (
+                    time.perf_counter() - consensus_started
+                )
+                proposals.append(proposal)
+                if decision is not None:
+                    decisions.append(decision)
+                if accepted and accepted_proposal is not None:
+                    pool.add(accepted_proposal)
+
+                self._write_process_event(
+                    {
+                        "event": "memory_proposal_consensus",
+                        "case_id": question.question_id,
+                        "proposer_agent_id": source,
+                        "proposal": proposal,
+                        "consensus_decision": decision,
+                        "weight_manager": self._weight_manager_parameters(),
+                        "weight_snapshots": self._weight_snapshots(),
+                    }
+                )
+                next_task = TextMessage(
+                    source="memory_coordinator",
+                    content=pool.coordinator_message(
+                        decision=proposal["_experiment"].get("consensus_result") or "rejected"
+                    ),
+                )
+
+            return events, decisions, proposals, []
+        finally:
+            # Accepted proposals are available only through ``pool`` while this case runs.
+            pool.accepted_proposals.clear()
+
+    async def _generate_memory_proposal(
         self,
         *,
         question: MMLUProQuestion,
-        events: list[Any],
-        agents: list[AssistantAgent],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        source: str,
+        react_output: str,
+        accepted_proposals: list[Any],
+    ) -> dict[str, Any] | None:
+        """
+        需要修改，是使用agent的model来进行生成，而不是真正的调用agent来总结memory。
+        关于相关proposal，应该是让agent从已有的proposal context中选择相关的proposal。
+        """
+        accepted_context = json.dumps(
+            [proposal.to_dict() for proposal in accepted_proposals],
+            ensure_ascii=False,
+        )
+        prompt = (
+            f"Task:\n{format_qa_task(question)}\n\n"
+            f"Agent {source} requested a memory proposal after this ReAct output:\n"
+            f"{react_output}\n\n"
+            "Accepted task-scoped proposals already available to this task:\n"
+            f"{accepted_context}\n\n"
+            + self.proposal_builder.build_generation_prompt(
+                parent_proposal_ids=[
+                    proposal.proposal_id for proposal in accepted_proposals
+                ],
+            )
+        )
+        model = self._agent_specs[source].model
+        try:
+            result = await self._client_for_model(model).create(
+                [
+                    SystemMessage(content="You construct safe, task-scoped memory proposals."),
+                    UserMessage(content=prompt, source=source),
+                ]
+            )
+        except Exception:
+            return None
+        return _extract_json_object(_model_result_text(result))
+
+    def _evaluate_memory_proposal(
+        self,
+        *,
+        question: MMLUProQuestion,
+        source: str,
+        payload: dict[str, Any],
+        accepted_proposals: list[Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any], bool, Any | None]:
+        """Build and validate one proposal before the group chat is allowed to continue."""
         assert self.weight_manager is not None
-        ours_cfg = self.config.ours
-        verification_cfg = dict(ours_cfg.get("verification", {}))
-        consensus_cfg = dict(ours_cfg.get("consensus", {}))
-        verifier_agents: dict[str, Any] = {
-            agent.name: agent for agent in agents if agent.name in self._agent_specs
-        }
+        proposal_cfg = self.config.consensus
+        verification_cfg = dict(proposal_cfg.get("verification", {}))
+        consensus_cfg = dict(proposal_cfg.get("consensus", {}))
         evaluator = AutoGenProposalEvaluator(
             model=self.config.default_model,
             temperature=self.config.temperature,
-            verifier_agents=verifier_agents,
+            verifier_agents=self._agents,
             verifier_models={
                 agent_id: spec.model for agent_id, spec in self._agent_specs.items()
             },
@@ -628,58 +666,37 @@ class Exp1Runner:
             ),
         )
         engine = VerificationEngine(evaluator=evaluator)
-        max_per_agent = int(ours_cfg.get("max_memory_proposals_per_agent_per_case", 1))
         include_proposer = bool(verification_cfg.get("include_proposer_as_verifier", False))
-        self_threshold = float(verification_cfg.get("self_confidence_threshold", 0.6))
-        decisions: list[dict[str, Any]] = []
-        proposals: list[dict[str, Any]] = []
-        accepted_proposals = []
-        counts_by_agent: dict[str, int] = {}
-        for source, content in _agent_outputs(events):
-            if source not in self._agent_specs:
+        proposal = self.proposal_builder.from_agent_output(
+            task_id=question.question_id,
+            agent_id=source,
+            output=payload,
+            parent_proposals=[item.proposal_id for item in accepted_proposals],
+        )
+        context = VerificationContext(
+            task_id=question.question_id,
+            task_description=format_qa_task(question),
+            related_proposals=accepted_proposals,
+        )
+        verifications = []
+        for agent_id in self._agent_specs:
+            if not include_proposer and agent_id == source:
                 continue
-            if counts_by_agent.get(source, 0) >= max_per_agent:
-                continue
-            payload = _extract_memory_proposal_payload(content)
-            if payload is None:
-                continue
-            counts_by_agent[source] = counts_by_agent.get(source, 0) + 1
-            proposal = self.proposal_builder.from_agent_output(
-                task_id=question.question_id,
-                agent_id=source,
-                output=payload,
-                parent_proposals=[item.proposal_id for item in accepted_proposals],
-            )
-            context = VerificationContext(
-                task_id=question.question_id,
-                task_description=format_qa_task(question),
-                related_proposals=accepted_proposals,
-            )
-            self_vector = engine.evaluate(proposal, context, verifier_agent_id=source)
-            proposal = _proposal_with_self_verification(proposal, self_vector)
-            if self_vector.confidence_score < self_threshold:
-                proposals.append(_proposal_payload(proposal, lifecycle="self_rejected"))
-                continue
-            verifications = []
-            if include_proposer:
-                verifications.append(self_vector)
-            for agent_id in self._agent_specs:
-                if agent_id == source:
-                    continue
-                verifications.append(engine.evaluate(proposal, context, verifier_agent_id=agent_id))
-            consensus = self._build_ours_consensus(consensus_cfg)
-            decision = consensus.decide(proposal, verifications)
-            proposal = _proposal_with_consensus_result(proposal, decision)
-            self._update_weights(source, decision)
-            decision_payload = decision.to_dict()
-            decisions.append(decision_payload)
-            lifecycle = "consensus_accepted" if decision.accepted else "consensus_rejected"
-            proposals.append(_proposal_payload(proposal, lifecycle=lifecycle, decision=decision_payload))
-            if decision.accepted:
-                accepted_proposals.append(proposal)
-        return decisions, proposals
+            verifications.append(engine.evaluate(proposal, context, verifier_agent_id=agent_id))
+        consensus = self._build_proposal_consensus(consensus_cfg)
+        decision = consensus.decide(proposal, verifications)
+        proposal = _proposal_with_consensus_result(proposal, decision)
+        self._update_weights(source, decision)
+        decision_payload = decision.to_dict()
+        lifecycle = "consensus_accepted" if decision.accepted else "consensus_rejected"
+        return (
+            decision_payload,
+            _proposal_payload(proposal, lifecycle=lifecycle, decision=decision_payload),
+            decision.accepted,
+            proposal if decision.accepted else None,
+        )
 
-    def _build_ours_consensus(self, consensus_cfg: dict[str, Any]) -> Any:
+    def _build_proposal_consensus(self, consensus_cfg: dict[str, Any]) -> Any:
         assert self.weight_manager is not None
         if consensus_cfg.get("strategy", "smart_quorum") == "majority_vote":
             return MajorityVoteConsensus(
@@ -709,7 +726,7 @@ class Exp1Runner:
         )
 
     def _build_weight_manager(self) -> WeightManager:
-        cfg = dict(self.config.ours.get("weight_manager", {}))
+        cfg = dict(self.config.consensus.get("weight_manager", {}))
         return WeightManager(
             alpha=float(cfg.get("alpha", 0.6)),
             beta=float(cfg.get("beta", 0.4)),
@@ -720,61 +737,6 @@ class Exp1Runner:
             initial_vc=float(cfg.get("initial_vc", 0.5)),
             initial_hc=float(cfg.get("initial_hc", 0.5)),
         )
-
-    def _ensure_memory_backend(self) -> Mem0MemoryBackend:
-        if self.memory_backend is None:
-            self.memory_backend = Mem0MemoryBackend(
-                topk=self.config.memory_topk,
-                default_user_id=self.memory_user_id or "exp1_mmlu_shared",
-            )
-        return self.memory_backend
-
-    def _upload_accepted_memory_proposals(
-        self,
-        proposals: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        uploads: list[dict[str, Any]] = []
-        accepted = [
-            proposal
-            for proposal in proposals
-            if proposal.get("_experiment", {}).get("lifecycle") == "consensus_accepted"
-        ]
-        if not accepted:
-            return uploads
-        backend = self._ensure_memory_backend()
-        for proposal in accepted:
-            try:
-                response = backend.add(
-                    json.dumps(proposal, ensure_ascii=False),
-                    user_id=self.memory_user_id,
-                    metadata={
-                        "source": "exp1_mmlu",
-                        "proposal_id": proposal.get("header", {}).get("proposal_id", ""),
-                        "task_id": proposal.get("header", {}).get("task_id", ""),
-                        "agent_id": proposal.get("header", {}).get("agent_id", ""),
-                        "consensus_result": proposal.get("verification", {})
-                        .get("consensus_result", {})
-                        .get("result", ""),
-                    },
-                )
-                uploads.append(
-                    {
-                        "proposal_id": proposal.get("header", {}).get("proposal_id", ""),
-                        "user_id": self.memory_user_id,
-                        "uploaded": True,
-                        "response": response,
-                    }
-                )
-            except Exception as exc:
-                uploads.append(
-                    {
-                        "proposal_id": proposal.get("header", {}).get("proposal_id", ""),
-                        "user_id": self.memory_user_id,
-                        "uploaded": False,
-                        "error": str(exc),
-                    }
-                )
-        return uploads
 
     def _update_weights(self, proposer: str, decision: Any) -> None:
         assert self.weight_manager is not None
@@ -799,6 +761,56 @@ class Exp1Runner:
             for agent_id in sorted(self._agent_specs)
         }
 
+    def _weight_manager_parameters(self) -> dict[str, Any]:
+        if self.weight_manager is None:
+            return {}
+        return {
+            "alpha": self.weight_manager.alpha,
+            "beta": self.weight_manager.beta,
+            "gamma": self.weight_manager.gamma,
+            "theta": self.weight_manager.theta,
+            "proposal_window": self.weight_manager.proposal_window,
+            "vote_window": self.weight_manager.vote_window,
+            "initial_vc": self.weight_manager.initial_vc,
+            "initial_hc": self.weight_manager.initial_hc,
+        }
+
+    def _record_group_finished(self) -> None:
+        if (
+            self._active_group is None
+            or not self._active_group.uses_consensus
+            or self._group_finished
+        ):
+            return
+        self._write_process_event(
+            {
+                "event": "group_finished",
+                "group": self._active_group.to_dict(),
+                "completed_case_count": self._group_case_count,
+                "final_weight_snapshots": self._weight_snapshots(),
+            }
+        )
+        self._group_finished = True
+
+    def _write_process_event(self, event: dict[str, Any]) -> None:
+        """Append consensus-only audit records without mixing them into metrics."""
+        if self._active_group is None or not self._active_group.uses_consensus:
+            return
+        if self._process_log_path is None:
+            self._process_log_path = (
+                Path(self.config.output_root)
+                / self.config.run_id
+                / "consensus_process.jsonl"
+            )
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "group_id": self._active_group.group_id,
+            **event,
+        }
+        self._process_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._process_log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
 
 def format_qa_task(question: MMLUProQuestion) -> str:
     options = "\n".join(
@@ -806,8 +818,7 @@ def format_qa_task(question: MMLUProQuestion) -> str:
         for index, option in enumerate(question.options)
     )
     return (
-        "Answer the following MMLU-Pro multiple-choice question.\n"
-        f"Category: {question.category}\n"
+        "Answer the following multiple-choice question.\n"
         f"Question: {question.question}\n"
         f"Options:\n{options}\n\n"
         "Return the final answer exactly as ANSWER:(<LETTER>)."
@@ -820,34 +831,26 @@ def summarize_group_results(
 ) -> dict[str, Any]:
     total = len(results)
     correct = sum(1 for result in results if result.correct)
-    proposals = [proposal for result in results for proposal in result.memory_proposals]
-    uploads = [upload for result in results for upload in result.memory_uploads]
-    decisions = [decision for result in results for decision in result.consensus_decisions]
-    qc_values = [
-        float(decision.get("metadata", {}).get("qc"))
-        for decision in decisions
-        if decision.get("metadata", {}).get("qc") is not None
-    ]
-    vote_counts = [
-        len(decision.get("votes", []) or [])
-        for decision in decisions
-    ]
-    final_weight_snapshots = _final_weight_snapshots(decisions) or _last_weight_snapshots(results)
+    time_metrics = {
+        "total_seconds": _sum_metric(results, "total_case_seconds"),
+        "task_completion_seconds": _sum_metric(results, "task_completion_seconds"),
+    }
+    interaction_metrics = {
+        "agent_message_count": _sum_metric(results, "interaction_message_count"),
+    }
+    if group.uses_consensus or group.uses_wbft:
+        time_metrics["consensus_extra_seconds"] = _sum_metric(
+            results, "consensus_extra_seconds"
+        )
+        interaction_metrics["extra_consensus_or_wbft_message_count"] = _sum_metric(
+            results, "consensus_extra_message_count"
+        )
     regular_metrics = {
         "accuracy": correct / total if total else 0.0,
         "correct": correct,
         "all": total,
-        "time": {
-            "total_seconds": _sum_metric(results, "total_case_seconds"),
-            "task_completion_seconds": _sum_metric(results, "task_completion_seconds"),
-            "consensus_extra_seconds": _sum_metric(results, "consensus_extra_seconds"),
-        },
-        "interaction": {
-            "agent_message_count": _sum_metric(results, "interaction_message_count"),
-            "extra_consensus_or_wbft_message_count": _sum_metric(
-                results, "consensus_extra_message_count"
-            ),
-        },
+        "time": time_metrics,
+        "interaction": interaction_metrics,
         "tokens": {
             "total_tokens": _sum_metric(results, "total_tokens"),
             "prompt_tokens": _sum_metric(results, "prompt_tokens"),
@@ -861,152 +864,50 @@ def summarize_group_results(
             ),
         },
     }
-    memory_proposal_metrics = {
-        "proposal_count": len(proposals),
-        "accepted": sum(
-            1
-            for item in proposals
-            if item.get("_experiment", {}).get("lifecycle") == "consensus_accepted"
-        ),
-        "rejected": sum(
-            1
-            for item in proposals
-            if item.get("_experiment", {}).get("lifecycle") == "consensus_rejected"
-        ),
-        "self_rejected": sum(
-            1
-            for item in proposals
-            if item.get("_experiment", {}).get("lifecycle") == "self_rejected"
-        ),
-        "consensus": {
-            "decision_count": len(decisions),
-            "qc_values": qc_values,
-            "qc_min": min(qc_values) if qc_values else None,
-            "qc_mean": sum(qc_values) / len(qc_values) if qc_values else None,
-            "qc_max": max(qc_values) if qc_values else None,
-            "voter_counts": vote_counts,
-            "voter_count_min": min(vote_counts) if vote_counts else None,
-            "voter_count_mean": sum(vote_counts) / len(vote_counts) if vote_counts else None,
-            "voter_count_max": max(vote_counts) if vote_counts else None,
-        },
-        "weights": {
-            "initial_snapshots": _initial_weight_snapshots(results),
-            "updates_after_each_consensus": [
-                decision.get("metadata", {}).get("weight_snapshots_after_update")
-                for decision in decisions
-                if decision.get("metadata", {}).get("weight_snapshots_after_update")
-            ],
-            "final_snapshots": final_weight_snapshots,
-        },
-        "tokens": {
-            "memory_proposal_tokens": _sum_metric(results, "memory_proposal_tokens"),
-            "per_proposal_tokens": [
-                proposal.get("_experiment", {}).get("token_count")
-                for proposal in proposals
-                if proposal.get("_experiment", {}).get("token_count") is not None
-            ],
-            "token_source": "estimated",
-        },
-        "mem0": {
-            "user_ids": sorted(
-                {
-                    str(upload.get("user_id"))
-                    for upload in uploads
-                    if upload.get("user_id")
-                }
-            ),
-            "upload_count": len(uploads),
-            "uploaded": sum(1 for upload in uploads if upload.get("uploaded") is True),
-            "failed": sum(1 for upload in uploads if upload.get("uploaded") is False),
-            "uploads": uploads,
-        },
+    messages = {
+        "interaction_message_count": regular_metrics["interaction"]["agent_message_count"],
     }
-    return {
+    if group.uses_consensus or group.uses_wbft:
+        messages["consensus_extra_message_count"] = regular_metrics["interaction"][
+            "extra_consensus_or_wbft_message_count"
+        ]
+    summary = {
         "group": group.to_dict(),
         "cases": total,
         "correct": correct,
         "accuracy": regular_metrics["accuracy"],
         "regular_metrics": regular_metrics,
-        "memory_proposal_metrics": memory_proposal_metrics,
         "time": regular_metrics["time"],
-        "messages": {
-            "interaction_message_count": regular_metrics["interaction"]["agent_message_count"],
-            "consensus_extra_message_count": regular_metrics["interaction"][
-                "extra_consensus_or_wbft_message_count"
-            ],
-        },
-        "memory": {
-            "proposal_count": memory_proposal_metrics["proposal_count"],
-            "accepted": memory_proposal_metrics["accepted"],
-            "rejected": memory_proposal_metrics["rejected"],
-            "self_rejected": memory_proposal_metrics["self_rejected"],
-        },
-        "consensus": memory_proposal_metrics["consensus"],
-        "weights": {
-            "initial_snapshots": memory_proposal_metrics["weights"]["initial_snapshots"],
-            "final_snapshots": memory_proposal_metrics["weights"]["final_snapshots"],
-            "updates": memory_proposal_metrics["weights"]["updates_after_each_consensus"],
-        },
-        "tokens": {
-            **regular_metrics["tokens"],
-            "memory_proposal_tokens": memory_proposal_metrics["tokens"][
-                "memory_proposal_tokens"
-            ],
-        },
+        "messages": messages,
     }
+    if group.uses_consensus:
+        summary["consensus_process"] = {
+            "storage": "separate JSONL audit file",
+            "proposal_count": sum(len(result.memory_proposals) for result in results),
+            "decision_count": sum(len(result.consensus_decisions) for result in results),
+            "task_memory_persistent": False,
+        }
+    return summary
 
 
 def _read_dataset_records(path: Path) -> list[dict[str, Any]]:
-    files = [path] if path.is_file() else _dataset_files(path)
-    records: list[dict[str, Any]] = []
-    for file_path in files:
-        suffix = file_path.suffix.lower()
-        if suffix == ".jsonl":
-            records.extend(
-                json.loads(line)
-                for line in file_path.read_text(encoding="utf-8-sig").splitlines()
-                if line.strip()
-            )
-        elif suffix == ".json":
-            payload = json.loads(file_path.read_text(encoding="utf-8-sig"))
-            if isinstance(payload, list):
-                records.extend(payload)
-            elif isinstance(payload, dict):
-                for key in ("data", "train", "test", "validation"):
-                    if isinstance(payload.get(key), list):
-                        records.extend(payload[key])
-                if not records:
-                    records.append(payload)
-        elif suffix == ".csv":
-            import pandas as pd
-
-            records.extend(pd.read_csv(file_path).to_dict(orient="records"))
-        elif suffix == ".parquet":
-            import pandas as pd
-
-            records.extend(pd.read_parquet(file_path).to_dict(orient="records"))
-    if not records:
-        raise ValueError(f"No MMLU-Pro records found under {path}.")
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    records = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or not records:
+        raise ValueError(f"No MMLU-Pro records found in {path}.")
     return records
 
 
-def _dataset_files(path: Path) -> list[Path]:
-    suffixes = {".json", ".jsonl", ".csv", ".parquet"}
-    return sorted(
-        item
-        for item in path.rglob("*")
-        if item.is_file() and item.suffix.lower() in suffixes
-    )
-
-
 def _normalize_mmlu_record(record: dict[str, Any], index: int) -> MMLUProQuestion:
-    category = str(_first_present(record, "category", "subject", "domain") or "unknown")
-    question = str(_first_present(record, "question", "input", "prompt") or "")
-    options_value = _first_present(record, "options", "choices", "choice")
-    options = _normalize_options(record, options_value)
-    answer = _normalize_answer(_first_present(record, "answer", "label", "target", "correct_answer"))
-    question_id = str(_first_present(record, "id", "question_id") or f"{category}_{index:04d}")
-    if not question or not options or answer is None:
+    question_id = str(record["question_id"])
+    category = str(record["category"])
+    question = str(record["question"])
+    options_value = record["options"]
+    if not isinstance(options_value, list):
+        raise ValueError(f"Cannot normalize MMLU-Pro record at index {index}: {record}")
+    options = [str(option) for option in options_value]
+    answer = str(record["answer"]).strip().upper()
+    if not question or not options or not re.fullmatch(r"[A-J]", answer):
         raise ValueError(f"Cannot normalize MMLU-Pro record at index {index}: {record}")
     return MMLUProQuestion(
         question_id=_slug(question_id),
@@ -1014,83 +915,37 @@ def _normalize_mmlu_record(record: dict[str, Any], index: int) -> MMLUProQuestio
         question=question,
         options=options,
         answer=answer,
-        raw=_json_safe(dict(record)),
+        raw=dict(record["raw"]),
     )
 
 
-def _normalize_options(record: dict[str, Any], value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item) for item in value]
-    if isinstance(value, tuple):
-        return [str(item) for item in value]
-    if hasattr(value, "tolist") and not isinstance(value, str):
-        payload = value.tolist()
-        if isinstance(payload, list):
-            return [str(item) for item in payload]
-    if isinstance(value, str):
-        text = value.strip()
-        if text.startswith("["):
-            try:
-                payload = json.loads(text)
-                if isinstance(payload, list):
-                    return [str(item) for item in payload]
-            except json.JSONDecodeError:
-                pass
-        return [part.strip() for part in re.split(r"\s*\|\s*", text) if part.strip()]
-    letter_options = []
-    for letter in "ABCDEFGHIJ":
-        if letter in record:
-            letter_options.append(str(record[letter]))
-        elif letter.lower() in record:
-            letter_options.append(str(record[letter.lower()]))
-    return letter_options
-
-
-def _normalize_answer(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if re.fullmatch(r"[A-Ja-j]", text):
-        return text.upper()
-    if re.fullmatch(r"\d+", text):
-        index = int(text)
-        if 0 <= index <= 9:
-            return chr(ord("A") + index)
-        if 1 <= index <= 10:
-            return chr(ord("A") + index - 1)
-    match = re.search(r"\b([A-J])\b", text.upper())
-    return match.group(1) if match else None
-
-
-def _first_present(record: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in record and record[key] is not None:
-            return record[key]
-    return None
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if hasattr(value, "tolist") and not isinstance(value, str):
-        return _json_safe(value.tolist())
-    if hasattr(value, "item") and not isinstance(value, str):
-        try:
-            return value.item()
-        except Exception:
-            pass
-    return value
-
-
-def _message_count(events: list[Any]) -> int:
+def _agent_message_count(events: list[Any], agent_ids: set[str]) -> int:
     return sum(
         1
         for event in events
-        if getattr(event, "source", None)
+        if getattr(event, "source", None) in agent_ids
         and isinstance(getattr(event, "content", None), str)
     )
+
+
+def _final_agent_text(events: list[Any], agent_ids: set[str]) -> str:
+    for event in reversed(events):
+        source = getattr(event, "source", None)
+        content = getattr(event, "content", None)
+        if source in agent_ids and isinstance(content, str) and content.strip():
+            return content
+        messages = getattr(event, "messages", None)
+        if messages:
+            for message in reversed(messages):
+                message_source = getattr(message, "source", None)
+                message_content = getattr(message, "content", None)
+                if (
+                    message_source in agent_ids
+                    and isinstance(message_content, str)
+                    and message_content.strip()
+                ):
+                    return message_content
+    return ""
 
 
 def _trace(events: list[Any]) -> str:
@@ -1174,31 +1029,6 @@ def _sum_metric(results: list[Exp1CaseResult], key: str) -> float | int:
     return sum(values) if values else 0
 
 
-def _final_weight_snapshots(decisions: list[dict[str, Any]]) -> dict[str, Any]:
-    snapshots: dict[str, Any] = {}
-    for decision in decisions:
-        update = decision.get("metadata", {}).get("weight_snapshots_after_update")
-        if isinstance(update, dict):
-            snapshots = update
-    return snapshots
-
-
-def _initial_weight_snapshots(results: list[Exp1CaseResult]) -> dict[str, Any]:
-    for result in results:
-        snapshots = result.metrics.get("initial_weight_snapshots")
-        if isinstance(snapshots, dict):
-            return snapshots
-    return {}
-
-
-def _last_weight_snapshots(results: list[Exp1CaseResult]) -> dict[str, Any]:
-    for result in reversed(results):
-        snapshots = result.metrics.get("final_weight_snapshots")
-        if isinstance(snapshots, dict):
-            return snapshots
-    return {}
-
-
 def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     marker = "MEMORY_PROPOSAL"
     if marker not in content:
@@ -1206,14 +1036,31 @@ def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     block = content.split(marker, 1)[1]
     if "END_MEMORY_PROPOSAL" in block:
         block = block.split("END_MEMORY_PROPOSAL", 1)[0]
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", block, flags=re.DOTALL)
-    candidate = fenced.group(1) if fenced else block[block.find("{") : block.rfind("}") + 1]
+    return _extract_json_object(block)
+
+
+def _extract_json_object(content: str) -> dict[str, Any] | None:
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, flags=re.DOTALL)
+    candidate = (
+        fenced.group(1)
+        if fenced
+        else content[content.find("{") : content.rfind("}") + 1]
+    )
     if not candidate or not candidate.startswith("{"):
         return None
     payload = _loads_json_object(candidate)
     if payload is None:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _model_result_text(result: Any) -> str:
+    content = getattr(result, "content", result)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(item) for item in content)
+    return str(content)
 
 
 def _loads_json_object(candidate: str) -> dict[str, Any] | None:
@@ -1227,21 +1074,6 @@ def _loads_json_object(candidate: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             return None
     return payload if isinstance(payload, dict) else None
-
-
-def _proposal_with_self_verification(proposal: Any, vector: VerificationVector) -> Any:
-    return replace(
-        proposal,
-        verification=replace(
-            proposal.verification,
-            self_verification=SelfVerificationScores(
-                veracity_score=vector.veracity,
-                rationality_score=vector.rationality,
-                value_score=vector.value,
-                security_score=vector.security,
-            ),
-        ),
-    )
 
 
 def _proposal_with_consensus_result(proposal: Any, decision: Any) -> Any:
