@@ -1,107 +1,84 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
 
-from dotenv import load_dotenv
 
+@dataclass
+class TaskMemoryBackend:
+    """In-process shared memory for one task, cleared by constructing a new instance."""
 
-class Mem0MemoryBackend:
-    """Mem0-backed memory store used by AutoGen agents in TAMAS experiments."""
+    task_id: str = "task"
+    accepted_proposals: list[Any] = field(default_factory=list)
 
-    def __init__(
-        self,
-        *,
-        api_key: str | None = None,
-        client: Any | None = None,
-        topk: int = 5,
-        default_user_id: str = "shared_mas",
-    ) -> None:
-        self.client = client
-        self.topk = topk
-        self.default_user_id = default_user_id
-        if self.client is None:
-            load_dotenv()
-            os.environ.setdefault("MEM0_DIR", str(Path("data/mem0").resolve()))
-            from mem0 import MemoryClient
-
-            self.client = MemoryClient(api_key=api_key or os.getenv("MEM0_API_KEY"))
-
-    def add(
-        self,
-        content: str,
-        *,
-        user_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Any:
-        return self.client.add(
-            [{"role": "assistant", "content": content}],
-            user_id=user_id or self.default_user_id,
-            metadata=metadata or {},
-        )
-
-    def search(self, query: str, user_id: str | None = None) -> list[dict[str, Any]]:
-        response = self.client.search(
-            query,
-            filters={"user_id": user_id or self.default_user_id},
-            top_k=self.topk,
-        )
-        if not response:
-            return []
-        if isinstance(response, dict):
-            return list(response.get("results", []))
-        return list(response)
-
-    def add_proposal(self, proposal: Any, user_id: str | None = None) -> Any:
+    def add_proposal(self, proposal: Any) -> Any:
         consensus_result = _proposal_consensus_result(proposal)
         if consensus_result != "pass":
             raise ValueError(
-                "Only memory proposals with consensus_result='pass' can be uploaded to Mem0."
+                "Only memory proposals with consensus_result='pass' can enter task memory."
             )
-        return self.add(
-            _proposal_json(proposal),
-            user_id=user_id,
-            metadata=_proposal_metadata(proposal),
+        self.accepted_proposals.append(proposal)
+        return proposal
+
+    def payloads(self) -> list[dict[str, Any]]:
+        return [_proposal_payload(proposal) for proposal in self.accepted_proposals]
+
+    def search(self, query: str) -> list[dict[str, Any]]:
+        needle = query.casefold()
+        results = []
+        for payload in self.payloads():
+            text = json.dumps(payload, ensure_ascii=False, default=str).casefold()
+            if needle in text:
+                results.append(payload)
+        return results
+
+    def context_text(self) -> str:
+        payloads = self.payloads()
+        if not payloads:
+            return ""
+        return (
+            "The following proposals passed consensus during this task. "
+            "Use them as verified short-term shared context only for this task.\n"
+            f"SHARED_TASK_MEMORY\n{json.dumps(payloads, ensure_ascii=False, default=str)}\n"
+            "END_SHARED_TASK_MEMORY"
         )
 
-
-def _proposal_json(proposal: Any) -> str:
-    if hasattr(proposal, "to_json"):
-        return proposal.to_json()
-    if hasattr(proposal, "model_dump_json"):
-        return proposal.model_dump_json(indent=2)
-    return json.dumps(proposal, ensure_ascii=False, default=str)
+    def clear(self) -> None:
+        self.accepted_proposals.clear()
 
 
-def _proposal_metadata(proposal: Any) -> dict[str, Any]:
-    header = getattr(proposal, "header", None)
-    consensus_result = _proposal_consensus_result(proposal)
-    if header is None:
-        return {"consensus_result": consensus_result or ""}
-    return {
-        "proposal_id": getattr(header, "proposal_id", ""),
-        "task_id": getattr(header, "task_id", ""),
-        "agent_id": getattr(header, "agent_id", ""),
-        "body_hash": getattr(header, "body_hash", ""),
-        "timestamp": getattr(header, "timestamp", ""),
-        "consensus_result": consensus_result or "",
-    }
+def _proposal_payload(proposal: Any) -> dict[str, Any]:
+    if hasattr(proposal, "to_dict"):
+        payload = proposal.to_dict()
+    elif hasattr(proposal, "model_dump"):
+        payload = proposal.model_dump()
+    elif isinstance(proposal, dict):
+        payload = dict(proposal)
+    else:
+        payload = json.loads(json.dumps(proposal, ensure_ascii=False, default=str))
+    return payload if isinstance(payload, dict) else {"value": payload}
 
 
 def _proposal_consensus_result(proposal: Any) -> str | None:
     verification = getattr(proposal, "verification", None)
+    if verification is None and isinstance(proposal, dict):
+        verification = proposal.get("verification")
     consensus_result = getattr(verification, "consensus_result", None)
-    return getattr(consensus_result, "result", None)
+    if consensus_result is None and isinstance(verification, dict):
+        consensus_result = verification.get("consensus_result")
+    result = getattr(consensus_result, "result", None)
+    if result is None and isinstance(consensus_result, dict):
+        result = consensus_result.get("result")
+    return str(result) if result is not None else None
 
 
-def build_memory_tools(memory_backend: Mem0MemoryBackend, *, user_id: str | None = None):
-    async def search_memory(query: str) -> str:
-        """Search the shared Mem0 memory for relevant prior information."""
-        return json.dumps(memory_backend.search(query, user_id=user_id), ensure_ascii=False, default=str)
+def build_task_memory_tools(task_memory: TaskMemoryBackend):
+    async def search_task_memory(query: str) -> str:
+        """Search accepted short-term shared memory for the current task."""
+        return json.dumps(task_memory.search(query), ensure_ascii=False, default=str)
 
-    return [search_memory]
+    return [search_task_memory]
 
 
-__all__ = ["Mem0MemoryBackend", "build_memory_tools"]
+__all__ = ["TaskMemoryBackend", "build_task_memory_tools"]

@@ -11,7 +11,11 @@ Exp1Method = Literal[
     "discussion_based",
     "discussion_based_cp_wbft",
     "discussion_based_consensus",
+    "role_based",
+    "role_based_cp_wbft",
+    "role_based_consensus",
 ]
+
 ModelRegime = Literal[
     "same",
     "weak_byzantine_strong_honest",

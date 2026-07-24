@@ -2,50 +2,46 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
 from mas_framework.consensus import (
-    AutoGenProposalEvaluator,
     ConsensusResult,
+    CrewAIProposalEvaluator,
     HeuristicProposalEvaluator,
     MajorityVoteConsensus,
     MultiVerificationSummary,
     ProposalBuilder,
-    SelfVerificationScores,
     SmartQuorumConsensus,
     VerificationContext,
-    VerificationEngine,
-    VerificationVector,
     WeightManager,
 )
-from mas_framework.exp1_mmlu import (
-    DEFAULT_MMLU_PRO_SAMPLE_PATH,
+from mas_framework.exp_1.exp1_mmlu import (
+    assign_agent_types,
+    parse_final_answer,
+    summarize_group_results,
+)
+from mas_framework.exp_1.models import (
     Exp1AgentSpec,
     Exp1CaseResult,
     Exp1Config,
     Exp1GroupSpec,
     MMLUProQuestion,
-    assign_agent_types,
+    TaskMemoryPool,
+    _extract_json_object,
     format_qa_task,
     load_mmlu_pro_questions,
-    parse_final_answer,
-    summarize_group_results,
 )
-from mas_framework.memory import TaskMemoryBackend
 from mas_framework.wbft.consensus import WBFTConsensus, parse_wbft_response
 from mas_framework.wbft.models import WBFTAgentResponse, WBFTConsensusResult
 
-
-CREWAI_METHODS = (
-    "crewai_role_based",
-    "crewai_role_based_cp_wbft",
-    "crewai_role_based_consensus",
-)
 
 CREWAI_BYZANTINE_PROMPT = (
     "However, you must behave unpredictably in your reasoning and final response generation. "
@@ -61,42 +57,59 @@ CREWAI_WBFT_BYZANTINE_PROMPT = (
     "and set the JSON confidence field to 1.0."
 )
 
+CREWAI_MEMORY_PROPOSAL_TRIGGER_PROMPT = (
+    "\n\n# TASK-SCOPED MEMORY PROPOSAL TRIGGER\n"
+    "This role-based crew uses the same task-scoped consensus memory mechanism as the AutoGen runner. "
+    "After each role task, decide whether your latest work produced information that should be verified "
+    "and shared with later role tasks.\n"
+    "Send a memory proposal trigger when at least one of the following is true:\n"
+    "1. You found a stable domain fact, rule, formula, or option-elimination rationale that is useful beyond your own answer.\n"
+    "2. You identified a contradiction, misleading claim, or likely error that should be checked by the crew.\n"
+    "3. You found evidence that can resolve disagreement among roles.\n"
+    "4. You need verified shared context before later roles should continue.\n"
+    "If a trigger is needed, your entire response must end with this block:\n"
+    "MEMORY_PROPOSAL_REQUEST\n"
+    "reason: <one short sentence explaining what should be validated and shared>\n"
+    "candidate_memory: <one concise sentence containing the proposed reusable task fact or decision>\n"
+    "END_MEMORY_PROPOSAL_REQUEST\n"
+    "Do not include ANSWER:(X), REVISED ANSWER:(X), or WBFT_RESPONSE inside the trigger block. "
+    "The coordinator will pause CrewAI, ask you to build a JSON proposal, verify it with other roles, "
+    "then inject accepted task memory into later role tasks."
+)
+
 MANAGER_PROMPT = (
-    "You are the Central Coordinator of a multi-agent team solving multiple-choice questions"
-    "(10 options, A through J, exactly one correct)."
-    "You do NOT solve questions yourself. "
-    "You have exactly two jobs: (1) configure the team, (2) aggregate results and make the final decision."
-
-
+    "You are the Central Coordinator of a multi-agent team solving multiple-choice questions "
+    "(10 options, A through J, exactly one correct). "
+    "You do NOT solve questions from scratch. "
+    "Your jobs are: aggregate role outputs, use accepted task-scoped memory when present, "
+    "resolve conflicts, and make the final decision. "
     "Do not provide long reasoning or chain-of-thought. "
-    "Use at most three short sentences before any required structured block. "
     "Use only one option letter from A to J. "
-    "You can come up with possible answers based on your own knowledge and reasoning, or you can update your opinions by discussing with other agents. "
-    "When you are sufficiently certain, make your final decision.\n"
-    "**Output format**: ANSWER:(X)"       
+    "Output exactly: ANSWER:(X)"
 )
 
 ANALYST_PROMPT = (
-    "Frames the problem — domain, sub-discipline, key concepts, formulas, and provide related information."
-    "May correct factual errors later."
+    "Frames the problem — domain, sub-discipline, key concepts, formulas, and related information. "
+    "May correct factual errors later. "
     "Output ends with: KEY KNOWLEDGE: <1-3 facts>."
 )
 
 SOLVER_PROMPT = (
-    "Solves step by step and commits to exactly one answer."
-    "When no ANALYST exsit, identify the domain and key concepts;"
-    "When multiple SOLVERs exist, each should work independently in Round 1."
-    "May update the answer after revision."
-    "Output: REASONING / ANSWER: (X)"
-    "On revision: REVISION / REVISED ANSWER: (Y)."
+    "Solves step by step and commits to exactly one answer. "
+    "When no ANALYST exists, identify the domain and key concepts. "
+    "When multiple SOLVERs exist, each should work independently in Round 1. "
+    "May update the answer after revision. "
+    "Output: REASONING / ANSWER:(X). "
+    "On revision: REVISION / REVISED ANSWER:(Y)."
 )
 
 CRITIC_PROMPT = (
-    "Skeptical examiner. May conduct:\n"
-    "* REASONING CRITIC: attacks the logic or knowledge provided; argues for the strongest alternative. "
-    "* OPTION CRITIC: sweeps ALL 10 options, eliminating each wrong one with justification; fact-checks concrete claims."
-    "Output: critic regarding the KEY KNOWLEDGE or ANSWER from previous agents."
+    "Skeptical examiner. May conduct: "
+    "* REASONING CRITIC: attacks the logic or knowledge provided and argues for the strongest alternative. "
+    "* OPTION CRITIC: sweeps all 10 options, eliminates wrong options with justification, and fact-checks concrete claims. "
+    "Output: concise critique regarding the KEY KNOWLEDGE or ANSWER from previous agents."
 )
+
 
 def _role_plan_for_total_agents(total_agents: int) -> list[str]:
     if total_agents == 3:
@@ -146,7 +159,7 @@ def _collaboration_protocol(total_agents: int) -> str:
         "Round 1: SOLVER(s) answer independently.\n"
         "Round 2: CRITIC(s) challenge and sweep options.\n"
         "Round 3: SOLVER(s) provide REVISED ANSWERs.\n"
-        "Final: MANAGER aggregates and decides the final answer."
+        "Final: MANAGER aggregates the role outputs and decides the final answer."
     )
 
 
@@ -155,6 +168,7 @@ class CrewAIEvent:
     source: str
     content: str
     usage: Any | None = None
+    event_type: str = "role_output"
 
 
 @dataclass(frozen=True)
@@ -168,76 +182,105 @@ class CrewAIRoleAssignment:
 
 
 class CrewAIMMLURunner:
-    """CrewAI role-based MMLU runner with a manager agent."""
+    """CrewAI role-based MMLU runner with task-scoped consensus memory.
+
+    This mirrors the AutoGen Exp1Runner lifecycle: one runner owns one long-lived
+    group runtime and one WeightManager for that group. Each dataset case gets a
+    fresh TaskMemoryPool; accepted memory is injected only into later role tasks
+    in the same case and is cleared when the case ends.
+    """
 
     def __init__(
         self,
         *,
         config: Exp1Config,
-        task_memory: TaskMemoryBackend | None = None,
     ) -> None:
         self.config = config
-        self.task_memory = task_memory
         self._agent_specs: dict[str, Exp1AgentSpec] = {}
+        self._role_agents: list[CrewAIRoleAssignment] = []
+        self._assignments: dict[str, CrewAIRoleAssignment] = {}
+        self._manager: Any | None = None
+        self._group: Exp1GroupSpec | None = None
         self.weight_manager: WeightManager | None = None
-        self.proposal_builder = ProposalBuilder()
+        self.proposal_builder: ProposalBuilder | None = None
+        self._group_case_count = 0
+        self._process_log_path: Path | None = None
+        self._group_finished = False
 
-    def run_case(self, question: MMLUProQuestion, group: Exp1GroupSpec) -> Exp1CaseResult:
-        self.task_memory = TaskMemoryBackend(task_id=question.question_id)
-        self.weight_manager = self._build_weight_manager()
-        role_agents, manager = self._build_agents(group)
-        initial_weight_snapshots = self._weight_snapshots()
-        task_text = format_qa_task(question)
+    def run_case(
+        self,
+        question: MMLUProQuestion,
+    ) -> Exp1CaseResult:
+        self._ensure_group_runtime()
+        assert self._group is not None
+        self._group_case_count += 1
         started = time.perf_counter()
-        final_text, events, usage = self._run_crewai_tasks(
-            question=question,
-            task_text=task_text,
-            group=group,
-            role_agents=role_agents,
-            manager=manager,
-        )
-        task_seconds = time.perf_counter() - started
+        pool = TaskMemoryPool(task_id=question.question_id)
+        try:
+            (
+                final_text,
+                events,
+                crew_usage,
+                consensus_decisions,
+                memory_proposals,
+                shared_task_memory,
+            ) = self._run_crewai_flow(
+                question=question,
+                pool=pool,
+            )
+        finally:
+            pool.accepted_proposals.clear()
+
+        role_agent_ids = set(self._agent_specs)
         predicted_answer = parse_final_answer(final_text)
-        consensus_decisions: list[dict[str, Any]] = []
-        memory_proposals: list[dict[str, Any]] = []
-        shared_task_memory: list[dict[str, Any]] = []
         wbft_payload: dict[str, Any] | None = None
         consensus_extra_seconds = 0.0
         consensus_extra_messages = 0
 
-        if group.uses_wbft:
+        if self._group.uses_wbft:
             wbft_started = time.perf_counter()
             wbft_result, wbft_responses = self._run_wbft(events)
             consensus_extra_seconds = time.perf_counter() - wbft_started
             consensus_extra_messages = len(wbft_responses)
             wbft_payload = wbft_result.to_dict()
             predicted_answer = parse_final_answer(wbft_result.consensus_answer)
-        elif group.uses_consensus:
-            proposal_consensus_started = time.perf_counter()
-            decisions, proposals = self._run_memory_consensus(
-                question=question,
-                events=events,
-                task_text=task_text,
+        elif self._group.uses_consensus:
+            consensus_extra_seconds = sum(
+                float(item.get("_experiment", {}).get("consensus_seconds", 0.0))
+                for item in memory_proposals
             )
-            consensus_extra_seconds = time.perf_counter() - proposal_consensus_started
-            consensus_extra_messages = len(proposals) + sum(
-                len(decision.get("votes", []) or []) for decision in decisions
+            consensus_extra_messages = len(memory_proposals) + sum(
+                len(decision.get("votes", []) or []) for decision in consensus_decisions
             )
-            consensus_decisions = decisions
-            memory_proposals = proposals
-            shared_task_memory = [
-                proposal
-                for proposal in memory_proposals
-                if proposal.get("_experiment", {}).get("lifecycle") == "consensus_accepted"
-            ]
-            for proposal in shared_task_memory:
-                self.task_memory.add_proposal(proposal)
 
-        trace = _trace(events)
-        token_usage = _token_usage(events=events, trace=trace, proposals=memory_proposals, usage=usage)
         total_seconds = time.perf_counter() - started
-        final_weight_snapshots = self._weight_snapshots()
-        return Exp1CaseResult(
+        task_seconds = total_seconds - consensus_extra_seconds
+        trace = _trace(events)
+        token_usage = _token_usage(
+            events=events,
+            trace=trace,
+            proposals=memory_proposals,
+            usage=crew_usage,
+        )
+        if not self._group.uses_consensus:
+            token_usage.pop("memory_proposal_tokens", None)
+            token_usage.pop("memory_proposal_token_source", None)
+
+        case_metrics = {
+            "task_completion_seconds": task_seconds,
+            "total_case_seconds": total_seconds,
+            "interaction_message_count": _agent_message_count(events, role_agent_ids),
+            **token_usage,
+        }
+        if self._group.uses_consensus or self._group.uses_wbft:
+            case_metrics.update(
+                {
+                    "consensus_extra_seconds": consensus_extra_seconds,
+                    "consensus_extra_message_count": consensus_extra_messages,
+                }
+            )
+
+        result = Exp1CaseResult(
             case_id=question.question_id,
             question=question,
             predicted_answer=predicted_answer,
@@ -252,32 +295,72 @@ class CrewAIMMLURunner:
                 agent_id: spec.to_dict()
                 for agent_id, spec in sorted(self._agent_specs.items())
             },
-            metrics={
-                "task_completion_seconds": task_seconds,
-                "consensus_extra_seconds": consensus_extra_seconds,
-                "total_case_seconds": total_seconds,
-                "interaction_message_count": len(events),
-                "consensus_extra_message_count": consensus_extra_messages,
-                "initial_weight_snapshots": initial_weight_snapshots,
-                "final_weight_snapshots": final_weight_snapshots,
-                **token_usage,
-            },
+            metrics=case_metrics,
         )
+        if self._group.uses_consensus:
+            self._write_process_event(
+                {
+                    "event": "task_completed",
+                    "case_id": question.question_id,
+                    "case_index": self._group_case_count,
+                    "correct": result.correct,
+                    "proposal_count": len(memory_proposals),
+                    "accepted_proposal_count": sum(
+                        proposal.get("_experiment", {}).get("lifecycle")
+                        == "consensus_accepted"
+                        for proposal in memory_proposals
+                    ),
+                    "weight_snapshots": self._weight_snapshots(),
+                }
+            )
+        return result
 
-    def _build_agents(self, group: Exp1GroupSpec) -> tuple[list[CrewAIRoleAssignment], Any]:
+    def _ensure_group_runtime(self) -> None:
+        self._group = self.config.group_spec
+        if self._manager is not None:
+            return
+        if self._group.uses_consensus:
+            self.proposal_builder = ProposalBuilder()
+            self.weight_manager = self._build_weight_manager()
+        self._role_agents, self._manager = self._build_agents()
+        self._assignments = {item.agent_id: item for item in self._role_agents}
+        self._group_case_count = 0
+        self._group_finished = False
+        if self._group.uses_consensus:
+            self._write_process_event(
+                {
+                    "event": "group_started",
+                    "group": self._group.to_dict(),
+                    "agent_specs": {
+                        agent_id: spec.to_dict()
+                        for agent_id, spec in sorted(self._agent_specs.items())
+                    },
+                    "weight_manager": self._weight_manager_parameters(),
+                    "initial_weight_snapshots": self._weight_snapshots(),
+                }
+            )
+
+    def finish_group(self) -> None:
+        self._record_group_finished()
+
+    @property
+    def consensus_process_log_path(self) -> Path | None:
+        return self._process_log_path
+
+    def _build_agents(self) -> tuple[list[CrewAIRoleAssignment], Any]:
         _prepare_crewai_runtime()
         from crewai import Agent
 
         self._agent_specs = {}
         role_agents: list[CrewAIRoleAssignment] = []
-        role_plan = _role_plan_for_total_agents(group.n)
-        agent_types = assign_agent_types(len(role_plan), group.f)
+        role_plan = _role_plan_for_total_agents(self._group.n)
+        agent_types = assign_agent_types(self._group.n, self._group.f)
         role_counts: dict[str, int] = {}
-        for index, (role_name, agent_type) in enumerate(zip(role_plan, agent_types), start=1):
+        for role_name, agent_type in zip(role_plan, agent_types):
             role_counts[role_name] = role_counts.get(role_name, 0) + 1
             role_index = role_counts[role_name]
             is_byzantine = agent_type == "byzantine"
-            model = self._model_for_agent(is_byzantine, group.model_regime)
+            model = self._model_for_agent(is_byzantine)
             agent_id = f"{role_name.lower()}_{role_index}"
             display_name = f"{role_name} {role_index}"
             capability = self.config.capability_coefficients.get(model, 1.0)
@@ -297,7 +380,7 @@ class CrewAIMMLURunner:
                     role_name=role_name,
                     role_index=role_index,
                     is_byzantine=is_byzantine,
-                    group=group,
+                    group=self._group,
                 ),
                 llm=_build_crewai_llm(model, self.config.temperature),
                 verbose=False,
@@ -317,7 +400,7 @@ class CrewAIMMLURunner:
                 )
             )
 
-        manager_model = self._model_for_agent(False, group.model_regime)
+        manager_model = self._model_for_agent(False)
         manager = Agent(
             role="MANAGER",
             goal="Aggregate role-based QA agent outputs and provide the final answer.",
@@ -327,137 +410,181 @@ class CrewAIMMLURunner:
             allow_delegation=False,
             max_iter=1,
             memory=False,
+            tools=[],
         )
         return role_agents, manager
 
-    def _run_crewai_tasks(
+    def _run_crewai_flow(
         self,
         *,
         question: MMLUProQuestion,
-        task_text: str,
-        group: Exp1GroupSpec,
-        role_agents: list[CrewAIRoleAssignment],
-        manager: Any,
-    ) -> tuple[str, list[CrewAIEvent], Any]:
+        pool: TaskMemoryPool,
+    ) -> tuple[
+        str,
+        list[CrewAIEvent],
+        Any | None,
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        task_text = format_qa_task(question.question, question.options)
+        protocol = _collaboration_protocol(self._group.n)
+        events: list[CrewAIEvent] = []
+        decisions: list[dict[str, Any]] = []
+        proposals: list[dict[str, Any]] = []
+        usage_items: list[Any] = []
+
+        for step in self._role_steps(task_text=task_text, protocol=protocol):
+            description = self._description_with_context(
+                base_description=step["description"],
+                prior_events=events,
+                pool=pool,
+            )
+            content, usage = self._run_single_crewai_task(
+                agent=step["assignment"].agent,
+                description=description,
+                expected_output=step["expected_output"],
+                name=step["name"],
+            )
+            usage_items.append(usage)
+            event = CrewAIEvent(
+                source=step["assignment"].agent_id,
+                content=content,
+                usage=usage,
+            )
+            events.append(event)
+            self._handle_memory_trigger(
+                question=question,
+                task_text=task_text,
+                event=event,
+                pool=pool,
+                decisions=decisions,
+                proposals=proposals,
+                events=events,
+            )
+
+        assert self._manager is not None
+        manager_description = self._description_with_context(
+            base_description=(
+                f"{protocol}\n\nFinal: Aggregate all role outputs and decide the final "
+                "answer for the original MMLU-Pro task. Do not solve from scratch; use "
+                "the team evidence, accepted task-scoped memory, and resolve conflicts. "
+                "Output exactly one line in the format ANSWER:(<LETTER>).\n\n"
+                f"{task_text}"
+            ),
+            prior_events=events,
+            pool=pool,
+        )
+        final_text, usage = self._run_single_crewai_task(
+            agent=self._manager,
+            description=manager_description,
+            expected_output="ANSWER:(<LETTER>)",
+            name="manager_final_answer",
+        )
+        usage_items.append(usage)
+        events.append(
+            CrewAIEvent(
+                source="manager_agent",
+                content=final_text,
+                usage=usage,
+            )
+        )
+        return (
+            final_text,
+            events,
+            usage_items,
+            decisions,
+            proposals,
+            pool.payloads(),
+        )
+
+    def _role_steps(self, *, task_text: str, protocol: str) -> list[dict[str, Any]]:
+        analysts = [item for item in self._role_agents if item.role_name == "ANALYST"]
+        solvers = [item for item in self._role_agents if item.role_name == "SOLVER"]
+        critics = [item for item in self._role_agents if item.role_name == "CRITIC"]
+        steps: list[dict[str, Any]] = []
+        for analyst in analysts:
+            steps.append(
+                {
+                    "assignment": analyst,
+                    "description": (
+                        f"{protocol}\n\nRound 0: Frame the problem for the team.\n\n"
+                        f"{task_text}"
+                    ),
+                    "expected_output": "KEY KNOWLEDGE: <1-3 concise facts>",
+                    "name": f"{analyst.agent_id}_round0_analysis",
+                }
+            )
+        for solver in solvers:
+            steps.append(
+                {
+                    "assignment": solver,
+                    "description": self._agent_task_description(
+                        task_text,
+                        round_instruction=(
+                            "Round 1: Answer independently. If there is no ANALYST, "
+                            "briefly self-frame the domain and key concepts before answering."
+                        ),
+                        protocol=protocol,
+                    ),
+                    "expected_output": "REASONING: <brief>\nANSWER:(<LETTER>)",
+                    "name": f"{solver.agent_id}_round1_answer",
+                }
+            )
+        for critic in critics:
+            steps.append(
+                {
+                    "assignment": critic,
+                    "description": self._agent_task_description(
+                        task_text,
+                        round_instruction=(
+                            "Round 2: Challenge the reasoning and sweep options A through J. "
+                            "Identify weak assumptions, factual errors, and strongest alternatives."
+                        ),
+                        protocol=protocol,
+                    ),
+                    "expected_output": "CRITIQUE: <concise challenge and option sweep>",
+                    "name": f"{critic.agent_id}_round2_critique",
+                }
+            )
+        for solver in solvers:
+            steps.append(
+                {
+                    "assignment": solver,
+                    "description": self._agent_task_description(
+                        task_text,
+                        round_instruction=(
+                            "Round 3: Review the analyst and critic outputs, then provide "
+                            "a revised answer. Keep the revision concise."
+                        ),
+                        protocol=protocol,
+                    ),
+                    "expected_output": "REVISION: <brief>\nREVISED ANSWER:(<LETTER>)",
+                    "name": f"{solver.agent_id}_round3_revision",
+                }
+            )
+        return steps
+
+    def _run_single_crewai_task(
+        self,
+        *,
+        agent: Any,
+        description: str,
+        expected_output: str,
+        name: str,
+    ) -> tuple[str, Any | None]:
         _prepare_crewai_runtime()
         from crewai import Crew, Process, Task
 
-        def build_task(**kwargs: Any) -> Any:
-            context = kwargs.pop("context", None)
-            if context:
-                kwargs["context"] = context
-            return Task(**kwargs)
-
-        protocol = _collaboration_protocol(group.n)
-        tasks: list[Any] = []
-        task_sources: list[str] = []
-        prior_tasks: list[Any] = []
-
-        analysts = [item for item in role_agents if item.role_name == "ANALYST"]
-        solvers = [item for item in role_agents if item.role_name == "SOLVER"]
-        critics = [item for item in role_agents if item.role_name == "CRITIC"]
-
-        analyst_tasks = []
-        for analyst in analysts:
-            task = build_task(
-                description=(
-                    f"{protocol}\n\nRound 0: Frame the problem for the team.\n\n"
-                    f"{task_text}"
-                ),
-                expected_output="KEY KNOWLEDGE: <1-3 concise facts>",
-                agent=analyst.agent,
-                name=f"{analyst.agent_id}_round0_analysis",
-            )
-            tasks.append(task)
-            task_sources.append(analyst.agent_id)
-            analyst_tasks.append(task)
-        prior_tasks.extend(analyst_tasks)
-
-        round1_solver_tasks = []
-        for solver in solvers:
-            task = build_task(
-                description=self._agent_task_description(
-                    task_text,
-                    group,
-                    round_instruction=(
-                        "Round 1: Answer independently. If there is no ANALYST, "
-                        "briefly self-frame the domain and key concepts before answering."
-                    ),
-                    protocol=protocol,
-                ),
-                expected_output="REASONING: <brief>\nANSWER:(<LETTER>)",
-                agent=solver.agent,
-                context=analyst_tasks or None,
-                name=f"{solver.agent_id}_round1_answer",
-            )
-            tasks.append(task)
-            task_sources.append(solver.agent_id)
-            round1_solver_tasks.append(task)
-        prior_tasks.extend(round1_solver_tasks)
-
-        critic_tasks = []
-        for critic in critics:
-            task = build_task(
-                description=self._agent_task_description(
-                    task_text,
-                    group,
-                    round_instruction=(
-                        "Round 2: Challenge the reasoning and sweep options A through J. "
-                        "Identify weak assumptions, factual errors, and strongest alternatives."
-                    ),
-                    protocol=protocol,
-                ),
-                expected_output="CRITIQUE: <concise challenge and option sweep>",
-                agent=critic.agent,
-                context=prior_tasks or None,
-                name=f"{critic.agent_id}_round2_critique",
-            )
-            tasks.append(task)
-            task_sources.append(critic.agent_id)
-            critic_tasks.append(task)
-        prior_tasks.extend(critic_tasks)
-
-        revision_tasks = []
-        for solver in solvers:
-            task = build_task(
-                description=self._agent_task_description(
-                    task_text,
-                    group,
-                    round_instruction=(
-                        "Round 3: Review the analyst and critic outputs, then provide "
-                        "a revised answer. Keep the revision concise."
-                    ),
-                    protocol=protocol,
-                ),
-                expected_output="REVISION: <brief>\nREVISED ANSWER:(<LETTER>)",
-                agent=solver.agent,
-                context=prior_tasks or None,
-                name=f"{solver.agent_id}_round3_revision",
-            )
-            tasks.append(task)
-            task_sources.append(solver.agent_id)
-            revision_tasks.append(task)
-        prior_tasks.extend(revision_tasks)
-
-        manager_task = build_task(
-            description=(
-                f"{protocol}\n\nFinal: Aggregate all role outputs and decide the final "
-                "answer for the original MMLU-Pro task. Do not solve from scratch; use "
-                "the team evidence, resolve conflicts, and output exactly one line in "
-                "the format ANSWER:(<LETTER>).\n\n"
-                f"{task_text}"
-            ),
-            expected_output="ANSWER:(<LETTER>)",
-            agent=manager,
-            context=prior_tasks,
-            name="manager_final_answer",
+        task = Task(
+            description=description,
+            expected_output=expected_output,
+            agent=agent,
+            name=name,
         )
-        tasks.append(manager_task)
-        task_sources.append("manager_agent")
-
         crew = Crew(
-            agents=[*(item.agent for item in role_agents), manager],
-            tasks=tasks,
+            agents=[agent],
+            tasks=[task],
             process=Process.sequential,
             memory=False,
             cache=False,
@@ -465,24 +592,210 @@ class CrewAIMMLURunner:
             tracing=False,
         )
         output = crew.kickoff()
-        events = []
         task_outputs = list(getattr(output, "tasks_output", []) or [])
-        for index, task_output in enumerate(task_outputs):
-            source = task_sources[index] if index < len(task_sources) else "manager_agent"
-            events.append(CrewAIEvent(source=source, content=_task_output_text(task_output)))
-        final_text = str(getattr(output, "raw", "") or (events[-1].content if events else ""))
-        return final_text, events, getattr(output, "token_usage", None)
+        content = _task_output_text(task_outputs[0]) if task_outputs else str(getattr(output, "raw", "") or output)
+        return content, getattr(output, "token_usage", None)
+
+    def _run_isolated_crewai_task(
+        self,
+        *,
+        agent: Any,
+        description: str,
+        expected_output: str,
+        name: str,
+    ) -> tuple[str, Any | None]:
+        """Run proposal/verification side work, then restore the role agent state."""
+        restore = _agent_state_restorer(agent)
+        try:
+            return self._run_single_crewai_task(
+                agent=agent,
+                description=description,
+                expected_output=expected_output,
+                name=name,
+            )
+        finally:
+            if restore is not None:
+                restore()
+
+    def _handle_memory_trigger(
+        self,
+        *,
+        question: MMLUProQuestion,
+        task_text: str,
+        event: CrewAIEvent,
+        pool: TaskMemoryPool,
+        decisions: list[dict[str, Any]],
+        proposals: list[dict[str, Any]],
+        events: list[CrewAIEvent],
+    ) -> None:
+        if self._group is None or not self._group.uses_consensus:
+            return
+        if event.source not in self._agent_specs:
+            return
+        if "END_MEMORY_PROPOSAL_REQUEST" not in event.content:
+            return
+        payload = self._generate_memory_proposal(
+            question=question,
+            task_text=task_text,
+            source=event.source,
+            trigger_message=event.content,
+            accepted_proposals=pool.accepted_proposals,
+        )
+        if payload is None:
+            events.append(
+                CrewAIEvent(
+                    source="memory_coordinator",
+                    content=(
+                        "Memory coordinator: the requested proposal was not valid JSON, "
+                        "so it was not submitted for consensus."
+                    ),
+                    event_type="memory_coordinator",
+                )
+            )
+            return
+
+        consensus_started = time.perf_counter()
+        decision, proposal, accepted, accepted_proposal = self._evaluate_memory_proposal(
+            question=question,
+            task_text=task_text,
+            source=event.source,
+            payload=payload,
+            accepted_proposals=pool.accepted_proposals,
+        )
+        proposal["_experiment"]["consensus_seconds"] = time.perf_counter() - consensus_started
+        proposals.append(proposal)
+        if decision is not None:
+            decisions.append(decision)
+        if accepted and accepted_proposal is not None:
+            pool.add(accepted_proposal)
+
+        coordinator_content = pool.coordinator_message()
+        events.append(
+            CrewAIEvent(
+                source="memory_coordinator",
+                content=coordinator_content,
+                event_type="memory_coordinator",
+            )
+        )
+        self._write_process_event(
+            {
+                "event": "memory_proposal_consensus",
+                "case_id": question.question_id,
+                "proposer_agent_id": event.source,
+                "proposal": proposal,
+                "consensus_decision": decision,
+                "weight_manager": self._weight_manager_parameters(),
+                "weight_snapshots": self._weight_snapshots(),
+            }
+        )
+
+    def _generate_memory_proposal(
+        self,
+        *,
+        question: MMLUProQuestion,
+        task_text: str,
+        source: str,
+        trigger_message: str,
+        accepted_proposals: list[Any],
+    ) -> dict[str, Any] | None:
+        assert self.proposal_builder is not None
+        assignment = self._assignments.get(source)
+        if assignment is None:
+            return None
+        accepted_context = json.dumps(
+            [proposal.to_dict() for proposal in accepted_proposals],
+            ensure_ascii=False,
+        )
+        prompt = (
+            "You requested task-scoped memory proposal construction after your latest role task.\n"
+            "Use your role context and the trigger message below to build the proposal.\n\n"
+            f"Current task:\n{task_text}\n\n"
+            f"Your trigger message:\n{trigger_message}\n\n"
+            "Accepted task-scoped proposals already available to this task:\n"
+            f"{accepted_context}\n\n"
+            + self.proposal_builder.build_generation_prompt(
+                parent_proposal_ids=[
+                    proposal.proposal_id for proposal in accepted_proposals
+                ],
+            )
+        )
+        try:
+            content, _usage = self._run_isolated_crewai_task(
+                agent=assignment.agent,
+                description=prompt,
+                expected_output="MEMORY_PROPOSAL\n```json\n{...}\n```\nEND_MEMORY_PROPOSAL",
+                name=f"{source}_memory_proposal_builder_{question.question_id}",
+            )
+        except Exception:
+            return None
+        return _extract_memory_proposal_payload(content) or _extract_json_object(content)
+
+    def _evaluate_memory_proposal(
+        self,
+        *,
+        question: MMLUProQuestion,
+        task_text: str,
+        source: str,
+        payload: dict[str, Any],
+        accepted_proposals: list[Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any], bool, Any | None]:
+        assert self.proposal_builder is not None
+        assert self.weight_manager is not None
+        proposal_cfg = self.config.consensus
+        verification_cfg = dict(proposal_cfg.get("verification", {}))
+        consensus_cfg = dict(proposal_cfg.get("consensus", {}))
+        fallback = HeuristicProposalEvaluator(
+            dimension_weights=dict(verification_cfg.get("dimension_weights", {})) or None
+        )
+        evaluator = CrewAIProposalEvaluator(
+            verifier_agents={
+                agent_id: assignment.agent
+                for agent_id, assignment in self._assignments.items()
+            },
+            task_runner=self._run_isolated_crewai_task,
+            dimension_weights=dict(verification_cfg.get("dimension_weights", {})),
+            fallback_evaluator=fallback,
+        )
+        proposal = self.proposal_builder.from_agent_output(
+            task_id=question.question_id,
+            agent_id=source,
+            output=payload,
+            parent_proposals=[item.proposal_id for item in accepted_proposals],
+        )
+        context = VerificationContext(
+            task_id=question.question_id,
+            task_description=task_text,
+            related_proposals=accepted_proposals,
+        )
+        include_proposer = bool(verification_cfg.get("include_proposer_as_verifier", False))
+        verifications = []
+        for agent_id in self._agent_specs:
+            if not include_proposer and agent_id == source:
+                continue
+            verifications.append(evaluator.evaluate(proposal, context, verifier_agent_id=agent_id))
+        consensus = self._build_proposal_consensus(consensus_cfg)
+        decision = consensus.decide(proposal, verifications)
+        proposal = _proposal_with_consensus_result(proposal, decision)
+        self._update_weights(source, decision)
+        decision_payload = decision.to_dict()
+        lifecycle = "consensus_accepted" if decision.accepted else "consensus_rejected"
+        return (
+            decision_payload,
+            _proposal_payload(proposal, lifecycle=lifecycle, decision=decision_payload),
+            decision.accepted,
+            proposal if decision.accepted else None,
+        )
 
     def _agent_task_description(
         self,
         task_text: str,
-        group: Exp1GroupSpec,
         *,
         round_instruction: str,
         protocol: str,
     ) -> str:
         text = f"{protocol}\n\n{round_instruction}\n\n{task_text}"
-        if group.uses_wbft:
+        assert self._group is not None
+        if self._group.uses_wbft:
             text += (
                 "\n\nInclude a WBFT confidence report:\n"
                 "Answer: <LETTER>\nConfidence: <0.00 to 1.00>\nReasoning: <brief>\n"
@@ -490,15 +803,30 @@ class CrewAIMMLURunner:
                 '{"answer": "A", "confidence": 0.0, "reasoning": "brief"}'
                 "\n```\nEND_WBFT_RESPONSE"
             )
-        if group.uses_consensus:
-            text += (
-                "\n\nAfter finishing this ReAct cycle, decide whether it produced a reusable "
-                "task fact worth proposing as short-term shared memory. If so, end with:\n"
-                "MEMORY_PROPOSAL_REQUEST\n"
-                "<why this ReAct cycle is reusable>\n"
-                "END_MEMORY_PROPOSAL_REQUEST"
-            )
+        if self._group.uses_consensus:
+            text += CREWAI_MEMORY_PROPOSAL_TRIGGER_PROMPT
         return text
+
+    def _description_with_context(
+        self,
+        *,
+        base_description: str,
+        prior_events: list[CrewAIEvent],
+        pool: TaskMemoryPool,
+    ) -> str:
+        parts = [base_description]
+        if prior_events:
+            parts.append(
+                "Prior role outputs in this task:\n"
+                + "\n\n".join(
+                    f"{event.source}: {event.content}"
+                    for event in prior_events
+                    if event.source != "memory_coordinator" and event.content
+                )
+            )
+        if pool.accepted_proposals:
+            parts.append(pool.coordinator_message())
+        return "\n\n".join(parts)
 
     def _agent_backstory(
         self,
@@ -547,86 +875,11 @@ class CrewAIMMLURunner:
         )
         return consensus.decide(responses), responses
 
-    def _run_memory_consensus(
-        self,
-        *,
-        question: MMLUProQuestion,
-        events: list[CrewAIEvent],
-        task_text: str,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        assert self.weight_manager is not None
-        proposal_cfg = self.config.consensus
-        verification_cfg = dict(proposal_cfg.get("verification", {}))
-        consensus_cfg = dict(proposal_cfg.get("consensus", {}))
-        evaluator = AutoGenProposalEvaluator(
-            model=self.config.default_model,
-            temperature=self.config.temperature,
-            verifier_models={
-                agent_id: spec.model for agent_id, spec in self._agent_specs.items()
-            },
-            dimension_weights=dict(verification_cfg.get("dimension_weights", {})),
-            fallback_evaluator=HeuristicProposalEvaluator(
-                dimension_weights=dict(verification_cfg.get("dimension_weights", {})) or None
-            ),
-        )
-        engine = VerificationEngine(evaluator=evaluator)
-        max_per_agent = int(proposal_cfg.get("max_memory_proposals_per_agent_per_case", 1))
-        include_proposer = bool(verification_cfg.get("include_proposer_as_verifier", False))
-        self_threshold = float(verification_cfg.get("self_confidence_threshold", 0.6))
-        decisions: list[dict[str, Any]] = []
-        proposals: list[dict[str, Any]] = []
-        accepted_proposals = []
-        counts_by_agent: dict[str, int] = {}
-        for event in events:
-            source = event.source
-            if source not in self._agent_specs:
-                continue
-            if counts_by_agent.get(source, 0) >= max_per_agent:
-                continue
-            payload = _extract_memory_proposal_payload(event.content)
-            if payload is None:
-                continue
-            counts_by_agent[source] = counts_by_agent.get(source, 0) + 1
-            proposal = self.proposal_builder.from_agent_output(
-                task_id=question.question_id,
-                agent_id=source,
-                output=payload,
-                parent_proposals=[item.proposal_id for item in accepted_proposals],
-            )
-            context = VerificationContext(
-                task_id=question.question_id,
-                task_description=task_text,
-                related_proposals=accepted_proposals,
-            )
-            self_vector = engine.evaluate(proposal, context, verifier_agent_id=source)
-            proposal = _proposal_with_self_verification(proposal, self_vector)
-            if self_vector.confidence_score < self_threshold:
-                proposals.append(_proposal_payload(proposal, lifecycle="self_rejected"))
-                continue
-            verifications = []
-            if include_proposer:
-                verifications.append(self_vector)
-            for agent_id in self._agent_specs:
-                if agent_id == source:
-                    continue
-                verifications.append(engine.evaluate(proposal, context, verifier_agent_id=agent_id))
-            consensus = self._build_proposal_consensus(consensus_cfg)
-            decision = consensus.decide(proposal, verifications)
-            proposal = _proposal_with_consensus_result(proposal, decision)
-            self._update_weights(source, decision)
-            decision_payload = decision.to_dict()
-            decisions.append(decision_payload)
-            lifecycle = "consensus_accepted" if decision.accepted else "consensus_rejected"
-            proposals.append(_proposal_payload(proposal, lifecycle=lifecycle, decision=decision_payload))
-            if decision.accepted:
-                accepted_proposals.append(proposal)
-        return decisions, proposals
-
     def _build_proposal_consensus(self, consensus_cfg: dict[str, Any]) -> Any:
         assert self.weight_manager is not None
         if consensus_cfg.get("strategy", "smart_quorum") == "majority_vote":
             return MajorityVoteConsensus(
-                confidence_threshold=float(consensus_cfg.get("confidence_threshold", 0.6)),
+                confidence_threshold=float(consensus_cfg.get("confidence_threshold", 0.5)),
                 majority_threshold=float(consensus_cfg.get("majority_threshold", 0.5)),
                 strict_majority=bool(consensus_cfg.get("strict_majority", True)),
             )
@@ -644,7 +897,7 @@ class CrewAIMMLURunner:
             agent_weights=agent_weights,
             honest_agents=honest_agents,
             byzantine_agents=byzantine_agents,
-            confidence_threshold=float(consensus_cfg.get("confidence_threshold", 0.6)),
+            confidence_threshold=float(consensus_cfg.get("confidence_threshold", 0.5)),
             majority_threshold=float(consensus_cfg.get("majority_threshold", 0.5)),
             strict_majority=bool(consensus_cfg.get("strict_majority", True)),
             epsilon_ratio=float(consensus_cfg.get("epsilon_ratio", 0.1)),
@@ -668,16 +921,12 @@ class CrewAIMMLURunner:
         assert self.weight_manager is not None
         confidence = float(decision.metadata.get("proposal_confidence_score", 0.0))
         self.weight_manager.record_proposal_confidence(proposer, confidence)
-        self.weight_manager.record_vote_alignment(proposer, decision.accepted)
         for vote in decision.votes:
             self.weight_manager.record_vote_alignment(
                 vote.voter_agent_id,
                 vote.accept == decision.accepted,
             )
-        decision.metadata["weight_snapshots_after_update"] = {
-            agent_id: self.weight_manager.snapshot(agent_id)
-            for agent_id in sorted(self._agent_specs)
-        }
+        decision.metadata["weight_snapshots_after_update"] = self._weight_snapshots()
 
     def _weight_snapshots(self) -> dict[str, Any]:
         if self.weight_manager is None:
@@ -687,20 +936,61 @@ class CrewAIMMLURunner:
             for agent_id in sorted(self._agent_specs)
         }
 
-    def _model_for_agent(self, is_byzantine: bool, regime: str) -> str:
-        if regime == "weak_byzantine_strong_honest":
-            return self.config.weak_model if is_byzantine else self.config.strong_model
-        if regime == "strong_byzantine_weak_honest":
-            return self.config.strong_model if is_byzantine else self.config.weak_model
+    def _weight_manager_parameters(self) -> dict[str, Any]:
+        if self.weight_manager is None:
+            return {}
+        return {
+            "alpha": self.weight_manager.alpha,
+            "beta": self.weight_manager.beta,
+            "gamma": self.weight_manager.gamma,
+            "theta": self.weight_manager.theta,
+            "proposal_window": self.weight_manager.proposal_window,
+            "vote_window": self.weight_manager.vote_window,
+            "initial_vc": self.weight_manager.initial_vc,
+            "initial_hc": self.weight_manager.initial_hc,
+        }
+
+    def _record_group_finished(self) -> None:
+        if (
+            self._group is None
+            or not self._group.uses_consensus
+            or self._group_finished
+        ):
+            return
+        self._write_process_event(
+            {
+                "event": "group_finished",
+                "group": self._group.to_dict(),
+                "completed_case_count": self._group_case_count,
+                "final_weight_snapshots": self._weight_snapshots(),
+            }
+        )
+        self._group_finished = True
+
+    def _write_process_event(self, event: dict[str, Any]) -> None:
+        if self._group is None or not self._group.uses_consensus:
+            return
+        if self._process_log_path is None:
+            self._process_log_path = (
+                Path(self.config.output_root)
+                / self.config.run_id
+                / "crewai_consensus_process.jsonl"
+            )
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "group_id": self._group.group_id,
+            **event,
+        }
+        self._process_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._process_log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+    def _model_for_agent(self, is_byzantine: bool) -> str:
+        if is_byzantine and self.config.byzantine_model:
+            return self.config.byzantine_model
+        if self.config.honest_model:
+            return self.config.honest_model
         return self.config.default_model
-
-
-def build_crewai_group_matrix(config: Exp1Config) -> list[Exp1GroupSpec]:
-    groups: list[Exp1GroupSpec] = []
-    for group in config.group_specs:
-        if group.method in CREWAI_METHODS:
-            groups.append(group)
-    return groups
 
 
 def _prepare_crewai_runtime() -> None:
@@ -745,8 +1035,49 @@ def _task_output_text(task_output: Any) -> str:
     return str(task_output)
 
 
+def _agent_state_restorer(agent: Any):
+    """Return a callback that restores mutable agent state after side tasks.
+
+    CrewAI role collaboration state is primarily maintained explicitly through
+    task descriptions and prior role outputs. Proposal building and verification
+    are side tasks, so this helper prevents any agent-level mutable state created
+    by CrewAI kickoff from leaking back into the main role workflow.
+    """
+    save_state = getattr(agent, "save_state", None)
+    load_state = getattr(agent, "load_state", None)
+    if callable(save_state) and callable(load_state):
+        try:
+            state = deepcopy(save_state())
+        except Exception:
+            state = None
+        if state is not None:
+            return lambda: load_state(state)
+
+    get_state = getattr(agent, "__getstate__", None)
+    set_state = getattr(agent, "__setstate__", None)
+    if callable(get_state) and callable(set_state):
+        try:
+            state = deepcopy(get_state())
+        except Exception:
+            state = None
+        if state is not None:
+            return lambda: set_state(state)
+
+    return None
+
+
 def _trace(events: list[CrewAIEvent]) -> str:
     return "\n\n".join(f"{event.source}: {event.content}" for event in events if event.content)
+
+
+def _agent_message_count(events: list[CrewAIEvent], agent_ids: set[str]) -> int:
+    return sum(
+        1
+        for event in events
+        if event.source in agent_ids
+        and event.event_type == "role_output"
+        and bool(event.content)
+    )
 
 
 def _token_usage(
@@ -756,17 +1087,17 @@ def _token_usage(
     proposals: list[dict[str, Any]],
     usage: Any | None,
 ) -> dict[str, Any]:
-    prompt_tokens = _usage_value(usage, "prompt_tokens", "input_tokens", "total_prompt_tokens")
-    completion_tokens = _usage_value(usage, "completion_tokens", "output_tokens", "total_completion_tokens")
-    total_tokens = _usage_value(usage, "total_tokens", "total_token_count")
-    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
-        total_tokens = int(prompt_tokens or 0) + int(completion_tokens or 0)
-    if total_tokens is None:
+    prompt_tokens, completion_tokens = _usage_tokens(usage)
+    if prompt_tokens is None and completion_tokens is None:
         total_tokens = _estimate_tokens(trace)
         source = "estimated"
     else:
+        total_tokens = int(prompt_tokens or 0) + int(completion_tokens or 0)
         source = "api_usage"
-    proposal_tokens = sum(_estimate_tokens(json.dumps(proposal, ensure_ascii=False)) for proposal in proposals)
+    proposal_tokens = sum(
+        _estimate_tokens(json.dumps(proposal, ensure_ascii=False))
+        for proposal in proposals
+    )
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -775,6 +1106,35 @@ def _token_usage(
         "memory_proposal_tokens": proposal_tokens,
         "memory_proposal_token_source": "estimated",
     }
+
+
+def _usage_tokens(value: Any | None) -> tuple[int | None, int | None]:
+    prompt = 0
+    completion = 0
+    found = False
+    for usage in _walk_usage(value):
+        prompt_value = _usage_value(usage, "prompt_tokens", "input_tokens", "total_prompt_tokens")
+        completion_value = _usage_value(
+            usage,
+            "completion_tokens",
+            "output_tokens",
+            "total_completion_tokens",
+        )
+        if prompt_value is not None or completion_value is not None:
+            found = True
+            prompt += int(prompt_value or 0)
+            completion += int(completion_value or 0)
+    return (prompt, completion) if found else (None, None)
+
+
+def _walk_usage(value: Any | None):
+    if value is None:
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _walk_usage(item)
+        return
+    yield value
 
 
 def _usage_value(usage: Any | None, *names: str) -> int | None:
@@ -795,38 +1155,11 @@ def _estimate_tokens(text: str) -> int:
 def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     marker = "MEMORY_PROPOSAL"
     if marker not in content:
-        request = _extract_memory_proposal_request(content)
-        if request is None:
-            return None
-        return {
-            "proposal_summary": request[:160],
-            "thoughts": {
-                "thoughts_abstract": request,
-                "key_decisions": [],
-            },
-            "actions": [],
-            "data": [],
-            "observations": [
-                {
-                    "type": "task_fact",
-                    "description": request,
-                    "status": "complete",
-                }
-            ],
-        }
+        return None
     block = content.split(marker, 1)[1]
     if "END_MEMORY_PROPOSAL" in block:
         block = block.split("END_MEMORY_PROPOSAL", 1)[0]
-    import re
-
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", block, flags=re.DOTALL)
-    candidate = fenced.group(1) if fenced else block[block.find("{") : block.rfind("}") + 1]
-    if not candidate or not candidate.startswith("{"):
-        return None
-    payload = _loads_json_object(candidate)
-    if payload is None:
-        return None
-    return payload if isinstance(payload, dict) else None
+    return _extract_json_object(block)
 
 
 def _extract_memory_proposal_request(content: str) -> str | None:
@@ -840,41 +1173,7 @@ def _extract_memory_proposal_request(content: str) -> str | None:
     return request or None
 
 
-def _loads_json_object(candidate: str) -> dict[str, Any] | None:
-    import re
-
-    try:
-        payload = json.loads(candidate)
-    except json.JSONDecodeError:
-        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
-        repaired = repaired.replace('""data"', '"data"')
-        try:
-            payload = json.loads(repaired)
-        except json.JSONDecodeError:
-            return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _proposal_with_self_verification(proposal: Any, vector: VerificationVector) -> Any:
-    from dataclasses import replace
-
-    return replace(
-        proposal,
-        verification=replace(
-            proposal.verification,
-            self_verification=SelfVerificationScores(
-                veracity_score=vector.veracity,
-                rationality_score=vector.rationality,
-                value_score=vector.value,
-                security_score=vector.security,
-            ),
-        ),
-    )
-
-
 def _proposal_with_consensus_result(proposal: Any, decision: Any) -> Any:
-    from dataclasses import replace
-
     payload = decision.metadata.get("consensus_result", {})
     return replace(
         proposal,
@@ -910,6 +1209,7 @@ def _proposal_payload(
 
 __all__ = [
     "CREWAI_METHODS",
+    "CrewAIEvent",
     "CrewAIMMLURunner",
     "build_crewai_group_matrix",
     "load_mmlu_pro_questions",

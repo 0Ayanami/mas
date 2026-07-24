@@ -22,6 +22,7 @@ from mas_framework.consensus.proposal_builder import HashSignatureProvider, Prop
 from mas_framework.consensus.smart_quorum import SmartQuorumConsensus
 from mas_framework.consensus.verification_engine import (
     AutoGenProposalEvaluator,
+    CrewAIProposalEvaluator,
     HeuristicProposalEvaluator,
     ProposalEvaluator,
     VerificationEngine,
@@ -38,6 +39,7 @@ __all__ = [
     "ConsensusDecision",
     "ConsensusResult",
     "ConsensusVote",
+    "CrewAIProposalEvaluator",
     "DEFAULT_DIMENSION_WEIGHTS",
     "HashSignatureProvider",
     "HeuristicProposalEvaluator",

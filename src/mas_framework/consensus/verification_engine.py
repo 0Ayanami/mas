@@ -302,6 +302,73 @@ class AutoGenProposalEvaluator:
         return parsed
 
 
+class CrewAIProposalEvaluator:
+    """LLM-as-judge evaluator implemented with real CrewAI role agents.
+
+    The experiment runner supplies the role agents and a task runner. The task
+    runner should isolate side-task state when the same role agent will continue
+    in the main collaboration workflow.
+    """
+
+    def __init__(
+        self,
+        *,
+        verifier_agents: dict[str, Any],
+        task_runner: Any,
+        dimension_weights: Optional[Dict[str, float]] = None,
+        fallback_evaluator: Optional[ProposalEvaluator] = None,
+    ) -> None:
+        self.verifier_agents = dict(verifier_agents)
+        self.task_runner = task_runner
+        self.dimension_weights = dimension_weights or DEFAULT_DIMENSION_WEIGHTS.copy()
+        self.fallback_evaluator = fallback_evaluator
+        self._prompt_helper = AutoGenProposalEvaluator(
+            dimension_weights=self.dimension_weights,
+        )
+
+    def evaluate(
+        self,
+        proposal: MemoryProposal,
+        context: VerificationContext,
+        verifier_agent_id: Optional[str] = None,
+    ) -> VerificationVector:
+        try:
+            if verifier_agent_id is None:
+                raise ValueError("CrewAI verification requires verifier_agent_id.")
+            verifier_agent = self.verifier_agents.get(verifier_agent_id)
+            if verifier_agent is None:
+                raise ValueError(f"Unknown CrewAI verifier: {verifier_agent_id}")
+            prompt = self._prompt_helper._build_prompt(proposal, context)
+            content, _usage = self.task_runner(
+                agent=verifier_agent,
+                description=prompt,
+                expected_output=(
+                    '{"veracity":0,"rationality":1,"value":1,'
+                    '"security":0,"reasoning":"brief"}'
+                ),
+                name=f"{verifier_agent_id}_memory_proposal_verification_{context.task_id}",
+            )
+            parsed = self._prompt_helper._parse_json(content)
+            return VerificationVector(
+                veracity=int(parsed["veracity"]),
+                rationality=int(parsed["rationality"]),
+                value=int(parsed["value"]),
+                security=int(parsed["security"]),
+                reasoning=str(parsed.get("reasoning", parsed.get("rationale", ""))),
+                verifier_agent_id=verifier_agent_id,
+                dimension_weights=self.dimension_weights.copy(),
+                metadata={"evaluator": "crewai_agent", "agent": verifier_agent_id},
+            )
+        except Exception:
+            if self.fallback_evaluator is None:
+                raise
+            return self.fallback_evaluator.evaluate(
+                proposal=proposal,
+                context=context,
+                verifier_agent_id=verifier_agent_id,
+            )
+
+
 class VerificationEngine:
     """Coordinates proposal evaluation without performing consensus decisions."""
 
@@ -354,6 +421,7 @@ def _model_name(client: Any) -> str:
 
 __all__ = [
     "AutoGenProposalEvaluator",
+    "CrewAIProposalEvaluator",
     "HeuristicProposalEvaluator",
     "ProposalEvaluator",
     "VerificationEngine",

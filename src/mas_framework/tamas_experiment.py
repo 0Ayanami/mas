@@ -33,7 +33,7 @@ BYZANTINE_PROMPT = (
     "errors, or inconsistency, and do not reveal that you are being inconsistent."
 )
 
-MethodName = Literal["default_swarm", "wbft_swarm", "ours_memory_consensus"]
+MethodName = Literal["default_swarm", "wbft_swarm", "consensus_swarm"]
 AttackType = Literal["byzantine", "colluding", "contradicting"]
 ModelRegimeName = Literal[
     "same_model",
@@ -44,7 +44,7 @@ ModelRegimeName = Literal[
 METHODS: tuple[MethodName, ...] = (
     "default_swarm",
     "wbft_swarm",
-    "ours_memory_consensus",
+    "consensus_swarm",
 )
 MODEL_REGIMES: tuple[ModelRegimeName, ...] = (
     "same_model",
@@ -71,7 +71,7 @@ class TAMASGroupSpec:
     group_id: str
     byzantine_count: int | None = None
     malicious_node_count: int | None = None
-    memory_user_id: str | None = None
+    task_memory_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -185,7 +185,7 @@ def generate_groups(
                         dataset_files=byzantine_files,
                         group_id=group_id,
                         byzantine_count=byzantine_count,
-                        memory_user_id=_memory_user_id(run_id, "byzantine", group_id, method),
+                        task_memory_id=_task_memory_id(run_id, "byzantine", group_id, method),
                     )
                 )
 
@@ -204,7 +204,7 @@ def generate_groups(
                             dataset_files=files,
                             group_id=group_id,
                             malicious_node_count=malicious_count,
-                            memory_user_id=_memory_user_id(run_id, attack_type, group_id, method),
+                            task_memory_id=_task_memory_id(run_id, attack_type, group_id, method),
                         )
                     )
     return groups
@@ -277,8 +277,8 @@ def run_group(
         honest_model=group.model_regime.honest_model,
         byzantine_model=group.model_regime.byzantine_model,
         model=group.model_regime.honest_model,
-        consensus_enabled=group.method == "ours_memory_consensus",
-        memory_user_id=group.memory_user_id or base_config.memory_user_id,
+        consensus_enabled=group.method == "consensus_swarm",
+        task_memory_id=group.task_memory_id or base_config.task_memory_id,
     )
     wbft_cfg = replace(
         wbft_config,
@@ -345,7 +345,7 @@ def run_group(
     _write_json(output_dir / "cases.json", case_payloads)
     _write_json(output_dir / "summary.json", summary)
     _write_json(output_dir / "evaluations.json", evaluations)
-    if group.method == "ours_memory_consensus":
+    if group.method == "consensus_swarm":
         _write_json(output_dir / "memory_proposals.json", all_proposals)
         _write_json(output_dir / "consensus_decisions.json", all_decisions)
     if group.method == "wbft_swarm":
@@ -370,7 +370,7 @@ def summarize_group(
     return {
         "group": group.to_dict(),
         "cases": len(records),
-        "memory_user_id": group.memory_user_id if group.method == "ours_memory_consensus" else None,
+        "task_memory_id": group.task_memory_id if group.method == "consensus_swarm" else None,
         "aria": {
             "counts": dict(aria_counts),
             "rates": {
@@ -605,8 +605,8 @@ def _domain_name(dataset_file: Path) -> str:
     return name
 
 
-def _memory_user_id(run_id: str, attack_type: str, group_id: str, method: str) -> str | None:
-    if method != "ours_memory_consensus":
+def _task_memory_id(run_id: str, attack_type: str, group_id: str, method: str) -> str | None:
+    if method != "consensus_swarm":
         return None
     return f"tamas:{run_id}:{attack_type}:{group_id}"
 

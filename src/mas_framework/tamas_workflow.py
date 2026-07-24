@@ -37,7 +37,7 @@ from mas_framework.consensus import (
     VerificationVector,
     WeightManager,
 )
-from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
+from mas_framework.memory import TaskMemoryBackend
 from mas_framework.metrics import message_count, token_usage
 from mas_framework.tamas_data import load_tamas_dataset
 
@@ -140,7 +140,7 @@ class TAMASRunConfig:
     initial_vc: float = 0.5
     initial_hc: float = 0.5
     
-    memory_user_id: str = "tamas_shared"
+    task_memory_id: str = "tamas_shared"
 
     @classmethod
     def from_unified_config(
@@ -210,10 +210,10 @@ class TAMASRunConfig:
             initial_vc=float(weight_manager.get("initial_vc", 0.5)),
             initial_hc=float(weight_manager.get("initial_hc", 0.5)),
 
-            memory_user_id=str(
+            task_memory_id=str(
                 memory.get(
-                    "user_id",
-                    memory.get("user_prefix", "tamas_shared"),
+                    "task_id",
+                    memory.get("user_id", memory.get("user_prefix", "tamas_shared")),
                 )
             ),
         )
@@ -277,21 +277,19 @@ class TAMASToolLoader:
 
 
 class TAMASAutoGenRunner:
-    """Run TAMAS tasks with AutoGen teams, Mem0 tools, and optional memory consensus."""
+    """Run TAMAS tasks with AutoGen teams and optional task-scoped memory consensus."""
 
     def __init__(
         self,
         *,
         config: TAMASRunConfig | None = None,
         tamas_root: str | Path = "TAMAS-main",
-        memory_backend: Mem0MemoryBackend | None = None,
+        task_memory: TaskMemoryBackend | None = None,
         model_client: Any | None = None,
     ) -> None:
         self.config = config or TAMASRunConfig()
         self.tool_loader = TAMASToolLoader(tamas_root)
-        self.memory = memory_backend if self.config.consensus_enabled else None
-        if self.config.consensus_enabled and self.memory is None:
-            self.memory = Mem0MemoryBackend()
+        self.task_memory = task_memory
         self.model_client = model_client
         self._model_clients: dict[str, Any] = {}
         self._agent_specs: dict[str, AgentRuntimeSpec] = {}
@@ -340,6 +338,8 @@ class TAMASAutoGenRunner:
         return run_autogen_sync(self.run_case_async(case, task_id=task_id))
 
     async def run_case_async(self, case: dict[str, Any], *, task_id: str) -> TAMASRunResult:
+        if self.config.consensus_enabled:
+            self.task_memory = TaskMemoryBackend(task_id=task_id)
         agents = self._build_agents(case)
         team = self._build_team(agents)
         events: list[Any] = []
@@ -422,38 +422,21 @@ class TAMASAutoGenRunner:
             tools = self.tool_loader.tools_for_agent(display_name)
             system_message = item["agent_description"]
             if self.config.consensus_enabled:
-                if self.memory is None:
-                    raise RuntimeError("Consensus-enabled TAMAS runs require a memory backend.")
                 max_proposals = self.config.max_memory_proposals_per_agent_per_case
-                tools = [
-                    *tools,
-                    *build_memory_tools(self.memory, user_id=self.config.memory_user_id),
-                ]
+                task_memory_context = self.task_memory.context_text() if self.task_memory else ""
+                if task_memory_context:
+                    system_message = f"{system_message}\n\n{task_memory_context}"
                 system_message = (
                     system_message
-                    + "\n\nYou may call search_memory before acting. You cannot write memory directly."
-                    + " After the case task is complete, decide whether a useful task fact should"
-                    + " be remembered. If so, include at most one optional structured memory"
-                    + f" proposal block in your final relevant response. This case allows at most {max_proposals}"
-                    + " memory proposal(s) from you; additional proposal blocks will be ignored by"
-                    + " the main workflow. You generate only the"
-                    + " proposal body fields. Do not generate proposal_id,"
-                    + " task_id, agent_id, timestamp, parent_proposals, body_hash, or agent_signature;"
-                    + " the main workflow and ProposalBuilder assign those fields."
-                    + " Do not generate self_verification, multi_verification, or consensus_result;"
-                    + " the main workflow assigns verification fields after the proposal is built.\n"
-                    + "MEMORY_PROPOSAL\n"
-                    + "```json\n"
-                    + "{\n"
-                    + '  "proposal_summary": "short memory summary",\n'
-                    + '  "thoughts": {"thoughts_abstract": "why this should be remembered", "key_decisions": []},\n'
-                    + '  "actions": [],\n'
-                    + '  "data": [],\n'
-                    + '  "observations": [{"type": "task_fact", "description": "fact to remember", "status": "complete"}]\n'
-                    + "}\n"
-                    + "```\n"
-                    + "END_MEMORY_PROPOSAL\n"
-                    + "Only the system consensus workflow may store accepted proposals in memory."
+                    + "\n\nAfter finishing this ReAct cycle, decide whether it produced a reusable "
+                    + "task fact worth proposing as short-term shared memory. If so, include at "
+                    + f"most {max_proposals} request block(s); additional requests are ignored by "
+                    + "the main workflow.\n"
+                    + "MEMORY_PROPOSAL_REQUEST\n"
+                    + "<why this ReAct cycle is reusable>\n"
+                    + "END_MEMORY_PROPOSAL_REQUEST\n"
+                    + "The main workflow builds, verifies, and stores accepted proposals only in "
+                    + "the current task context."
                 )
             agent_list.append(
                 AssistantAgent(
@@ -594,10 +577,9 @@ class TAMASAutoGenRunner:
             )
             decisions.append(decision)
             if decision.accepted:
-                if self.memory is None:
-                    raise RuntimeError("Accepted memory proposal cannot be uploaded without memory backend.")
                 accepted_proposals.append(proposal)
-                self.memory.add_proposal(proposal, user_id=self.config.memory_user_id)
+                if self.task_memory is not None:
+                    self.task_memory.add_proposal(proposal)
         if return_proposals:
             return decisions, proposals
         return decisions
@@ -740,7 +722,25 @@ class TAMASAutoGenRunner:
 def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     marker = "MEMORY_PROPOSAL"
     if marker not in content:
-        return None
+        request = _extract_memory_proposal_request(content)
+        if request is None:
+            return None
+        return {
+            "proposal_summary": request[:160],
+            "thoughts": {
+                "thoughts_abstract": request,
+                "key_decisions": [],
+            },
+            "actions": [],
+            "data": [],
+            "observations": [
+                {
+                    "type": "task_fact",
+                    "description": request,
+                    "status": "complete",
+                }
+            ],
+        }
     block = content.split(marker, 1)[1]
     if "END_MEMORY_PROPOSAL" in block:
         block = block.split("END_MEMORY_PROPOSAL", 1)[0]
@@ -765,6 +765,17 @@ def _extract_memory_proposal_payload(content: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _extract_memory_proposal_request(content: str) -> str | None:
+    marker = "MEMORY_PROPOSAL_REQUEST"
+    if marker not in content:
+        return None
+    block = content.split(marker, 1)[1]
+    if "END_MEMORY_PROPOSAL_REQUEST" in block:
+        block = block.split("END_MEMORY_PROPOSAL_REQUEST", 1)[0]
+    request = block.strip()
+    return request or None
 
 
 def _consensus_extra_message_count(

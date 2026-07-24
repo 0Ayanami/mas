@@ -1,7 +1,7 @@
 experiment:
-  name: exp1_mmlu_pro_fault_tolerance
-  output_root: experiments/exp1_mmlu_pro
-  run_id: exp1_mmlu_pro
+  name: exp1_mmlu_pro_discussion_based
+  output_root: experiments/exp1_mmlu_autogen
+  run_id: exp1_mmlu_autogen
   seed: 42
 
 dataset:

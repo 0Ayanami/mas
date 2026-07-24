@@ -1,50 +1,60 @@
 experiment:
-  name: TAMAS
-  output_root: experiments/TAMAS
+  name: exp1_mmlu_pro_discussion_based
+  output_root: experiments/exp1_mmlu_autogen
   run_id: unified_template
-  log_level: INFO
+  seed: 42
+
+dataset:
+  name: modelscope/MMLU-Pro
+  path: src/mas_framework/mmlu/mmlu_pro_13x3_seed42.json
+  categories_per_sample: 13
+  samples_per_category: 3
 
 agents:
-  model: qwen3.6-35b-a3b
+  default_model: qwen3.6-35b-a3b
   capability_coefficient: 8.52
   models:
     honest: qwen3.6-35b-a3b
     byzantine: qwen3.6-35b-a3b
+    evaluator: deepseek-v4-flash
+  temperature: 0.0
   model_capability_coefficients:
+    qwen3.6-35b-a3b: 8.52
+    qwen3.6-plus: 8.85
     qwen3.6-max-preview: 8.85
     qwen3-max-preview: 8.4
     qwen3-8b: 7.25
-    qwen3.6-35b-a3b: 8.52
-    qwen3.6-plus: 8.85
     deepseek-v4-flash: 8.62
     qwen3.6-27b: 8.62
-  temperature: 0.0
-
-evaluator:
-  model: qwen3.6-27b
   
 collaboration:
-  max_messages: 8
+  allow_repeat_speaker: false
+  max_messages: 6
+  timeout_seconds: 300
+  request_timeout_seconds: 120
+  model_api_max_retries: 2
+
+group:
+  method: discussion_based_consensus
+  n: 3
+  f_value: 1
+  model_regime: same
 
 proposal:
-  enabled: true
   builder_enabled: true
   verification_enabled: true
   weight_manager_enabled: true
-  max_per_agent_per_case: 1
   verification:
     type: llm
     include_proposer_as_verifier: false
-    self_confidence_threshold: 0.6
-    dimension_weights: {
-      "veracity": 0.35,
-      "rationality": 0.20,
-      "value": 0.20,
-      "security": 0.25,
-    }
+    dimension_weights:
+      veracity: 0.35
+      rationality: 0.20
+      value: 0.20
+      security: 0.25
   consensus:
     strategy: smart_quorum
-    confidence_threshold: 0.6
+    confidence_threshold: 0.5
     majority_threshold: 0.5
     strict_majority: true
     epsilon_ratio: 0.1
@@ -59,11 +69,13 @@ proposal:
     vote_window: 30
     initial_vc: 0.5
     initial_hc: 0.5
-  fisher_lda:
-    enabled: false
-    alpha_initial: 0.6
-    beta_initial: 0.4
-    M: 1
 
-memory:
-  user_id: tamas_shared
+wbft:
+  confidence_extraction_method: regex
+  confidence_threshold: 0.0
+  convergence_threshold: 0.0
+  fault_tolerance_threshold: 0.33
+  minimum_participants: 1
+  normalization: auto
+  include_unstructured_outputs: true
+  fallback_confidence: 0.0
