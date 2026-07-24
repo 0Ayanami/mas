@@ -1,6 +1,5 @@
 import json
 
-import pytest
 from autogen_ext.models.replay import ReplayChatCompletionClient
 
 from mas_framework.consensus import (
@@ -11,31 +10,14 @@ from mas_framework.consensus import (
     VerificationContext,
     VerificationVector,
 )
-from mas_framework.memory import Mem0MemoryBackend, build_memory_tools
-
-from mas_framework.tamas_data import infer_attack_type
-from mas_framework.tamas_workflow import TAMASAutoGenRunner, TAMASRunConfig, TAMASToolLoader
-
-
-class FakeMem0:
-    def __init__(self):
-        self.items = []
-
-    def add(self, messages, **kwargs):
-        self.items.append({"messages": messages, "kwargs": kwargs})
-        return {"results": [{"id": f"mem-{len(self.items)}"}]}
-
-    def search(self, query, **kwargs):
-        return {
-            "results": [
-                {
-                    "memory": item["messages"][0]["content"],
-                    "metadata": item["kwargs"].get("metadata", {}),
-                }
-                for item in self.items
-                if query.lower() in item["messages"][0]["content"].lower()
-            ]
-        }
+from mas_framework.exp_1.models import TaskMemoryPool
+from mas_framework.exp_3.models import TAMASRunConfig, TamasGroupSpec
+from mas_framework.exp_3.tamas_data import infer_attack_type
+from mas_framework.exp_3.tamas_workflow import (
+    MEMORY_PROPOSAL_TRIGGER_PROMPT,
+    TAMASAutoGenRunner,
+    TAMASToolLoader,
+)
 
 
 class FakeVerificationAgent:
@@ -49,9 +31,17 @@ class FakeVerificationAgent:
             '"security":1,"reasoning":"agent ok"}'
         )
         self.tasks = []
+        self.state = {"history": ["before"]}
+
+    async def save_state(self):
+        return dict(self.state)
+
+    async def load_state(self, state):
+        self.state = dict(state)
 
     async def run(self, task):
         self.tasks.append(task)
+        self.state["history"].append("verification")
 
         class Result:
             messages = [
@@ -79,6 +69,14 @@ def agent_tool_names(agent):
     return {getattr(tool, "name", "") for tool in getattr(agent, "_tools", [])}
 
 
+def tamas_config(method="swarm", **kwargs):
+    return TAMASRunConfig(
+        config_path="test",
+        group_spec=TamasGroupSpec(method=method, n=3, f=1, model_regime="same"),
+        **kwargs,
+    )
+
+
 def test_autogen_verification_engine_uses_replay_model_client():
     proposal = ProposalBuilder().from_agent_output(
         task_id="task-1",
@@ -104,7 +102,7 @@ def test_autogen_verification_engine_uses_replay_model_client():
     assert vector.metadata["evaluator"] == "autogen"
 
 
-def test_autogen_verification_engine_uses_verifier_agent_when_available():
+def test_autogen_verification_engine_uses_verifier_agent_and_restores_state():
     proposal = ProposalBuilder().from_agent_output(
         task_id="task-1",
         agent_id="agent_a",
@@ -123,6 +121,7 @@ def test_autogen_verification_engine_uses_verifier_agent_when_available():
     )
 
     assert verifier.tasks
+    assert verifier.state == {"history": ["before"]}
     assert vector.confidence_score == 1.0
     assert vector.metadata["evaluator"] == "autogen_agent"
     assert vector.metadata["agent"] == verifier.name
@@ -133,7 +132,10 @@ def test_majority_and_smart_quorum_decisions():
     proposal = builder.from_agent_output(
         task_id="task-1",
         agent_id="agent_a",
-        output={"observations": ["A useful result"], "proposal_summary": "A useful result"},
+        output={
+            "observations": [{"type": "note", "description": "A useful result"}],
+            "proposal_summary": "A useful result",
+        },
     )
     context = VerificationContext(task_id="task-1")
     vectors = [
@@ -160,7 +162,10 @@ def test_smart_quorum_records_weighted_dimension_summary():
     proposal = ProposalBuilder().from_agent_output(
         task_id="task-1",
         agent_id="agent_a",
-        output={"observations": ["A useful result"], "proposal_summary": "A useful result"},
+        output={
+            "observations": [{"type": "note", "description": "A useful result"}],
+            "proposal_summary": "A useful result",
+        },
     )
     vectors = [
         VerificationVector(
@@ -193,36 +198,25 @@ def test_smart_quorum_records_weighted_dimension_summary():
     assert weighted_scores["security"] == 1.0
 
 
-def test_mem0_memory_tools_search_shared_memory_only():
-    backend = Mem0MemoryBackend(client=FakeMem0())
-    backend.add("Important TAMAS fact", user_id="shared-memory")
-    tools = build_memory_tools(backend, user_id="shared-memory")
-    search_memory = tools[0]
-
-    import asyncio
-
-    result = asyncio.run(search_memory("TAMAS"))
-
-    assert len(tools) == 1
-    assert tools[0].__name__ == "search_memory"
-    assert "Important TAMAS fact" in result
-
-
-def test_mem0_add_proposal_requires_passed_consensus():
-    backend = Mem0MemoryBackend(client=FakeMem0())
+def test_task_memory_pool_is_task_scoped_shared_context():
     proposal = ProposalBuilder().from_agent_output(
         task_id="task-1",
         agent_id="agent_a",
         output={
-            "observations": [{"type": "note", "description": "Useful memory"}],
-            "proposal_summary": "Useful memory",
+            "observations": [{"type": "note", "description": "Useful TAMAS fact"}],
+            "proposal_summary": "Useful TAMAS fact",
         },
     )
+    pool = TaskMemoryPool(task_id="task-1")
 
-    with pytest.raises(ValueError, match="consensus_result='pass'"):
-        backend.add_proposal(proposal, user_id="shared-memory")
+    pool.add(proposal)
 
-    assert backend.client.items == []
+    message = pool.coordinator_message()
+    assert len(pool.payloads()) == 1
+    assert "SHARED_TASK_MEMORY" in message
+    assert proposal.proposal_id in message
+    pool.accepted_proposals.clear()
+    assert pool.payloads() == []
 
 
 def test_tamas_tool_loader_handles_agent_suffixes():
@@ -249,8 +243,7 @@ def test_tamas_workflow_reads_byzantine_agent_type_from_dataset():
     path = "TAMAS-main/data/Byzantine/education_byzantine.json"
     case = TAMASAutoGenRunner.load_dataset(path)[0]
     runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=False,
+        config=tamas_config(
             honest_model="honest-model",
             byzantine_model="byzantine-model",
         ),
@@ -275,8 +268,7 @@ def test_tamas_workflow_reads_colluding_agent_type_from_dataset():
     path = "TAMAS-main/data/Colluding/education_colluding.json"
     case = TAMASAutoGenRunner.load_dataset(path)[0]
     runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=False,
+        config=tamas_config(
             honest_model="honest-model",
             byzantine_model="byzantine-model",
         ),
@@ -301,8 +293,7 @@ def test_tamas_workflow_reads_contradicting_agent_type_from_dataset():
     path = "TAMAS-main/data/Contradicting/legal_contradicting.json"
     case = TAMASAutoGenRunner.load_dataset(path)[0]
     runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=False,
+        config=tamas_config(
             honest_model="honest-model",
             byzantine_model="byzantine-model",
         ),
@@ -325,25 +316,22 @@ def test_tamas_workflow_reads_contradicting_agent_type_from_dataset():
 
 def test_tamas_runner_builds_swarm_agents_without_memory_when_consensus_disabled():
     case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    fake_mem0 = FakeMem0()
     runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=False,
+        config=tamas_config(
+            method="swarm",
             honest_model="honest-model",
             byzantine_model="byzantine-model",
-            model_capability_coefficients={
+            capability_coefficients={
                 "honest-model": 5.0,
                 "byzantine-model": 2.0,
             },
         ),
-        memory_backend=Mem0MemoryBackend(client=fake_mem0),
         model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
     )
 
     agents = runner._build_agents(case)
     team = runner._build_team(agents)
 
-    assert runner.memory is None
     assert len(agents) == 4
     assert [agent.name for agent in agents] == [
         "news_gathering_agent_1",
@@ -361,502 +349,41 @@ def test_tamas_runner_builds_swarm_agents_without_memory_when_consensus_disabled
     assert runner._agent_specs["distribution_agent_4"].model == "byzantine-model"
     assert runner._agent_specs["distribution_agent_4"].capability_coefficient == 2.0
     assert all("search_memory" not in agent_tool_names(agent) for agent in agents)
+    assert all(
+        MEMORY_PROPOSAL_TRIGGER_PROMPT not in getattr(agent, "_system_messages", [""])[0].content
+        for agent in agents
+    )
 
 
-def test_tamas_runner_adds_memory_tools_only_when_consensus_enabled():
+def test_tamas_runner_adds_memory_trigger_prompt_when_consensus_enabled():
     case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
     runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
+        config=tamas_config(
+            method="swarm_consensus",
             honest_model="honest-model",
             byzantine_model="byzantine-model",
         ),
-        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
         model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
     )
 
     agents = runner._build_agents(case)
 
-    assert runner.memory is not None
-    assert all("search_memory" in agent_tool_names(agent) for agent in agents)
-
-
-def test_tamas_runner_updates_weight_windows_after_consensus():
-    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-            model_capability_coefficients={
-                "honest-model": 5.0,
-                "byzantine-model": 2.0,
-            },
-            epsilon_ratio=0.0,
-        ),
-        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    runner._build_agents(case)
-    proposal = ProposalBuilder().from_agent_output(
-        task_id="task-1",
-        agent_id="news_gathering_agent_1",
-        output={"observations": ["A useful result"], "proposal_summary": "A useful result"},
-    )
-    verifications = [
-        VerificationVector(
-            veracity=1,
-            rationality=1,
-            value=1,
-            security=1,
-            verifier_agent_id="fact_checking_agent_2",
-        ),
-        VerificationVector(
-            veracity=1,
-            rationality=1,
-            value=1,
-            security=1,
-            verifier_agent_id="article_writing_agent_3",
-        ),
-        VerificationVector(
-            veracity=0,
-            rationality=1,
-            value=1,
-            security=0,
-            verifier_agent_id="distribution_agent_4",
-        ),
-    ]
-
-    consensus = runner._build_consensus(list(runner._agent_specs))
-    decision = consensus.decide(proposal, verifications)
-    runner._update_agent_weights_after_consensus(
-        proposer_agent_id=proposal.agent_id,
-        decision=decision,
+    assert all(
+        MEMORY_PROPOSAL_TRIGGER_PROMPT in getattr(agent, "_system_messages", [""])[0].content
+        for agent in agents
     )
 
-    proposer_state = runner.weight_manager.get_state("news_gathering_agent_1")
-    honest_verifier_state = runner.weight_manager.get_state("fact_checking_agent_2")
-    byzantine_verifier_state = runner.weight_manager.get_state("distribution_agent_4")
 
-    assert list(proposer_state.proposal_confidences) == [
-        decision.metadata["proposal_confidence_score"]
-    ]
-    assert list(proposer_state.vote_alignments) == [decision.accepted]
-    assert list(honest_verifier_state.vote_alignments) == [True]
-    assert list(byzantine_verifier_state.vote_alignments) == [False]
-    assert "weight_snapshots_after_update" in decision.metadata
-
-
-def test_tamas_consensus_stores_accepted_proposal_once_in_shared_memory():
-    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    fake_mem0 = FakeMem0()
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            verification_type="llm",
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-            model_capability_coefficients={
-                "honest-model": 5.0,
-                "byzantine-model": 2.0,
-            },
-            epsilon_ratio=0.0,
-            memory_user_id="shared-test-memory",
-        ),
-        memory_backend=Mem0MemoryBackend(client=fake_mem0),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    runner._build_agents(case)
-    fake_agents = [
-        FakeVerificationAgent(agent_id)
-        for agent_id in runner._agent_specs
-    ]
-    event = type(
-        "Event",
-        (),
-        {
-            "source": "news_gathering_agent_1",
-            "content": (
-                "A useful result worth remembering.\n"
-                "MEMORY_PROPOSAL\n"
-                "```json\n"
-                "{\n"
-                '  "proposal_summary": "A useful result worth remembering.",\n'
-                '  "observations": [{"type": "task_fact", "description": "A useful result worth remembering.", "status": "complete"}]\n'
-                "}\n"
-                "```\n"
-                "END_MEMORY_PROPOSAL"
-            ),
-        },
-    )()
-
-    decisions = runner._run_memory_consensus(
-        task_id="task-1",
-        task_description="Test shared memory upload",
-        events=[event],
-        agents=fake_agents,
+def test_exp3_config_loads_single_swarm_consensus_group():
+    config = TAMASRunConfig.from_yaml(
+        "src/mas_framework/configs/experiment_configs/exp3_tamas.yaml"
     )
 
-    assert decisions[0].accepted
-    assert len(fake_mem0.items) == 1
-    assert fake_mem0.items[0]["kwargs"]["user_id"] == "shared-test-memory"
-    assert fake_mem0.items[0]["kwargs"]["metadata"]["agent_id"] == "news_gathering_agent_1"
-    stored_proposal = json.loads(fake_mem0.items[0]["messages"][0]["content"])
-    assert stored_proposal["verification"]["self_verification"]["veracity_score"] == 1.0
-    assert stored_proposal["verification"]["multi_verification"]["weighted_scores"]
-    assert stored_proposal["verification"]["consensus_result"]["result"] == "pass"
-
-
-def test_tamas_proposal_builder_assigns_header_fields_from_workflow():
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            verification_type="heuristic",
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-        ),
-        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    payload = {
-        "proposal_summary": "Agent body-only proposal",
-        "proposal_id": "agent-must-not-control-this",
-        "task_id": "agent-must-not-control-this",
-        "agent_id": "agent-must-not-control-this",
-        "timestamp": "agent-must-not-control-this",
-        "body_hash": "agent-must-not-control-this",
-        "agent_signature": "agent-must-not-control-this",
-        "observations": [
-            {
-                "type": "task_fact",
-                "description": "Only body fields are consumed.",
-                "status": "complete",
-            }
-        ],
-        "self_verification": {
-            "veracity_score": 1,
-            "rationality_score": 1,
-            "value_score": 1,
-            "security_score": 1,
-        },
-    }
-
-    proposal = runner.proposal_builder.from_agent_output(
-        task_id="workflow-task",
-        agent_id="workflow_agent",
-        output=payload,
-    )
-
-    assert proposal.task_id == "workflow-task"
-    assert proposal.agent_id == "workflow_agent"
-    assert proposal.proposal_id != "agent-must-not-control-this"
-    assert proposal.header.body_hash != "agent-must-not-control-this"
-    assert proposal.header.agent_signature != "agent-must-not-control-this"
-    assert runner._self_verification_confidence(proposal) == 0.0
-
-
-def test_tamas_self_verification_gate_blocks_low_confidence_consensus():
-    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    fake_mem0 = FakeMem0()
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            verification_type="llm",
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-            self_confidence_threshold=0.6,
-            memory_user_id="shared-test-memory",
-        ),
-        memory_backend=Mem0MemoryBackend(client=fake_mem0),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    runner._build_agents(case)
-    fake_agents = [
-        FakeVerificationAgent(
-            agent_id,
-            content=(
-                '{"veracity":0,"rationality":0,"value":0,'
-                '"security":1,"reasoning":"low confidence self verification"}'
-            )
-            if agent_id == "news_gathering_agent_1"
-            else None,
-        )
-        for agent_id in runner._agent_specs
-    ]
-    event = type(
-        "Event",
-        (),
-        {
-            "source": "news_gathering_agent_1",
-            "content": (
-                "Low confidence proposal.\n"
-                "MEMORY_PROPOSAL\n"
-                "```json\n"
-                "{\n"
-                '  "proposal_summary": "Low confidence proposal.",\n'
-                '  "observations": [{"type": "task_fact", "description": "Low confidence.", "status": "complete"}]\n'
-                "}\n"
-                "```\n"
-                "END_MEMORY_PROPOSAL"
-            ),
-        },
-    )()
-
-    decisions, proposals = runner._run_memory_consensus(
-        task_id="task-1",
-        task_description="Test self gate",
-        events=[event],
-        agents=fake_agents,
-        return_proposals=True,
-    )
-
-    assert len(proposals) == 1
-    assert runner._self_verification_confidence(proposals[0]) == 0.25
-    assert decisions == []
-    assert fake_mem0.items == []
-    proposer = next(agent for agent in fake_agents if agent.name == "news_gathering_agent_1")
-    verifiers = [agent for agent in fake_agents if agent.name != "news_gathering_agent_1"]
-    assert proposer.tasks
-    assert all(agent.tasks == [] for agent in verifiers)
-
-
-def test_tamas_self_verification_threshold_is_inclusive_and_excludes_proposer_vote():
-    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    fake_mem0 = FakeMem0()
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            verification_type="llm",
-            include_proposer_as_verifier=False,
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-            self_confidence_threshold=0.6,
-            memory_user_id="shared-test-memory",
-        ),
-        memory_backend=Mem0MemoryBackend(client=fake_mem0),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    runner._build_agents(case)
-    fake_agents = [
-        FakeVerificationAgent(
-            agent_id,
-            content=(
-                '{"veracity":1,"rationality":0,"value":0,'
-                '"security":1,"reasoning":"boundary confidence self verification"}'
-            )
-            if agent_id == "news_gathering_agent_1"
-            else None,
-        )
-        for agent_id in runner._agent_specs
-    ]
-    event = type(
-        "Event",
-        (),
-        {
-            "source": "news_gathering_agent_1",
-            "content": (
-                "Boundary confidence proposal.\n"
-                "MEMORY_PROPOSAL\n"
-                "```json\n"
-                "{\n"
-                '  "proposal_summary": "Boundary confidence proposal.",\n'
-                '  "observations": [{"type": "task_fact", "description": "Boundary confidence.", "status": "complete"}]\n'
-                "}\n"
-                "```\n"
-                "END_MEMORY_PROPOSAL"
-            ),
-        },
-    )()
-
-    decisions, proposals = runner._run_memory_consensus(
-        task_id="task-1",
-        task_description="Test inclusive self gate",
-        events=[event],
-        agents=fake_agents,
-        return_proposals=True,
-    )
-
-    assert runner._self_verification_confidence(proposals[0]) == 0.6
-    assert len(decisions) == 1
-    assert "news_gathering_agent_1" not in {
-        vote.voter_agent_id for vote in decisions[0].votes
-    }
-    assert len(decisions[0].votes) == len(fake_agents) - 1
-    proposer = next(agent for agent in fake_agents if agent.name == "news_gathering_agent_1")
-    verifiers = [agent for agent in fake_agents if agent.name != "news_gathering_agent_1"]
-    assert proposer.tasks
-    assert all(agent.tasks for agent in verifiers)
-
-
-def test_tamas_include_proposer_as_verifier_adds_self_vote_to_consensus():
-    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            verification_type="llm",
-            include_proposer_as_verifier=True,
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-            self_confidence_threshold=0.6,
-            memory_user_id="shared-test-memory",
-        ),
-        memory_backend=Mem0MemoryBackend(client=FakeMem0()),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    runner._build_agents(case)
-    fake_agents = [FakeVerificationAgent(agent_id) for agent_id in runner._agent_specs]
-    event = type(
-        "Event",
-        (),
-        {
-            "source": "news_gathering_agent_1",
-            "content": (
-                "Include proposer vote.\n"
-                "MEMORY_PROPOSAL\n"
-                "```json\n"
-                "{\n"
-                '  "proposal_summary": "Include proposer vote.",\n'
-                '  "observations": [{"type": "task_fact", "description": "Include proposer vote.", "status": "complete"}]\n'
-                "}\n"
-                "```\n"
-                "END_MEMORY_PROPOSAL"
-            ),
-        },
-    )()
-
-    decisions, proposals = runner._run_memory_consensus(
-        task_id="task-1",
-        task_description="Test include proposer vote",
-        events=[event],
-        agents=fake_agents,
-        return_proposals=True,
-    )
-
-    assert len(proposals) == 1
-    assert len(decisions) == 1
-    assert "news_gathering_agent_1" in {
-        vote.voter_agent_id for vote in decisions[0].votes
-    }
-    assert len(decisions[0].votes) == len(fake_agents)
-
-
-def test_tamas_consensus_ignores_outputs_without_memory_proposal_block():
-    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    fake_mem0 = FakeMem0()
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            verification_type="heuristic",
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-            memory_user_id="shared-test-memory",
-        ),
-        memory_backend=Mem0MemoryBackend(client=fake_mem0),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    runner._build_agents(case)
-    fake_agents = [FakeVerificationAgent(agent_id) for agent_id in runner._agent_specs]
-    event = type(
-        "Event",
-        (),
-        {
-            "source": "news_gathering_agent_1",
-            "content": "Plain task response without a memory proposal.",
-        },
-    )()
-
-    decisions, proposals = runner._run_memory_consensus(
-        task_id="task-1",
-        task_description="Test no proposal",
-        events=[event],
-        agents=fake_agents,
-        return_proposals=True,
-    )
-
-    assert decisions == []
-    assert proposals == []
-    assert fake_mem0.items == []
-
-
-def test_tamas_limits_memory_proposals_per_agent_per_case():
-    case = TAMASAutoGenRunner.load_dataset("TAMAS-main/data/Byzantine/news_byzantine.json")[0]
-    fake_mem0 = FakeMem0()
-    runner = TAMASAutoGenRunner(
-        config=TAMASRunConfig(
-            consensus_enabled=True,
-            verification_type="heuristic",
-            honest_model="honest-model",
-            byzantine_model="byzantine-model",
-            memory_user_id="shared-test-memory",
-            max_memory_proposals_per_agent_per_case=1,
-        ),
-        memory_backend=Mem0MemoryBackend(client=fake_mem0),
-        model_client=ReplayChatCompletionClient(["ok"], model_info=model_info()),
-    )
-    runner._build_agents(case)
-    fake_agents = [FakeVerificationAgent(agent_id) for agent_id in runner._agent_specs]
-    first_event = type(
-        "Event",
-        (),
-        {
-            "source": "news_gathering_agent_1",
-            "content": (
-                "First proposal.\n"
-                "MEMORY_PROPOSAL\n"
-                "```json\n"
-                "{\n"
-                '  "proposal_summary": "First proposal.",\n'
-                '  "observations": [{"type": "task_fact", "description": "First proposal.", "status": "complete"}]\n'
-                "}\n"
-                "```\n"
-                "END_MEMORY_PROPOSAL"
-            ),
-        },
-    )()
-    second_event = type(
-        "Event",
-        (),
-        {
-            "source": "news_gathering_agent_1",
-            "content": (
-                "Second proposal.\n"
-                "MEMORY_PROPOSAL\n"
-                "```json\n"
-                "{\n"
-                '  "proposal_summary": "Second proposal.",\n'
-                '  "observations": [{"type": "task_fact", "description": "Second proposal.", "status": "complete"}]\n'
-                "}\n"
-                "```\n"
-                "END_MEMORY_PROPOSAL"
-            ),
-        },
-    )()
-
-    decisions, proposals = runner._run_memory_consensus(
-        task_id="task-1",
-        task_description="Test proposal cap",
-        events=[first_event, second_event],
-        agents=fake_agents,
-        return_proposals=True,
-    )
-
-    assert len(proposals) == 1
-    assert len(decisions) == 1
-    assert proposals[0].header.proposal_summary == "First proposal."
-    assert len(fake_mem0.items) == 1
-
-
-def test_unified_config_has_no_team_mode_and_enables_consensus():
-    config = TAMASRunConfig.from_unified_config(
-        "src/mas_framework/configs/experiment_configs/unified_config.yaml"
-    )
-
-    assert not hasattr(config, "mode")
+    assert config.group_spec.group_id == "swarm_consensus__n3__f1__same"
     assert config.consensus_enabled is True
     assert config.consensus_strategy == "smart_quorum"
-    assert config.self_confidence_threshold == 0.6
-    assert config.max_memory_proposals_per_agent_per_case == 1
+    assert config.max_memory_proposals_per_agent_per_case == 3
     assert config.honest_model in config.model_capability_coefficients
     assert config.byzantine_model in config.model_capability_coefficients
     assert config.model_capability_coefficients[config.honest_model] == config.capability_coefficient
-    assert config.model_capability_coefficients[config.byzantine_model] == config.capability_coefficient
+    assert json.dumps(config.group_spec.to_dict())

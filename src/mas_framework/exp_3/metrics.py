@@ -88,7 +88,6 @@ def usage_value(usage: Any, *names: str) -> int | None:
 
 
 def estimate_tokens(text: str) -> int:
-    # Conservative, dependency-free fallback used only when API usage is absent.
     return max(1, len(str(text)) // 4)
 
 
@@ -106,3 +105,13 @@ def sum_metric(results: Iterable[Any], key: str) -> float:
         metrics = getattr(result, "run_metrics", None) or getattr(result, "metrics", {})
         total += float(metrics.get(key, 0) or 0)
     return total
+
+
+__all__ = [
+    "estimate_tokens",
+    "final_weight_snapshots",
+    "message_count",
+    "sum_metric",
+    "token_usage",
+    "usage_tokens",
+]

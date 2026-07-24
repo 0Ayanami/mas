@@ -23,7 +23,7 @@ def __getattr__(name):
 
         return getattr(consensus, name)
     if name in {"TAMASAutoGenRunner", "TAMASRunConfig"}:
-        from mas_framework import tamas_workflow
+        from mas_framework.exp_3 import tamas_workflow
 
         return getattr(tamas_workflow, name)
     raise AttributeError(f"module 'mas_framework' has no attribute {name!r}")

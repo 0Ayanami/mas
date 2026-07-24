@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 from copy import deepcopy
 from typing import Any, Dict, Optional, Protocol
@@ -215,12 +216,12 @@ class AutoGenProposalEvaluator:
         save_state = getattr(verifier_agent, "save_state", None)
         load_state = getattr(verifier_agent, "load_state", None)
         if callable(save_state) and callable(load_state):
-            verifier_state = deepcopy(save_state())
+            verifier_state = deepcopy(_run_maybe_awaitable(save_state()))
         try:
             result = run_autogen_sync(verifier_agent.run(task=prompt))
         finally:
             if verifier_state is not None:
-                load_state(verifier_state)
+                _run_maybe_awaitable(load_state(verifier_state))
         return _agent_result_text(result)
 
     def _client_for(self, verifier_agent_id: Optional[str]) -> Any:
@@ -417,6 +418,12 @@ def _proposal_for_verification(proposal: MemoryProposal) -> dict[str, Any]:
 
 def _model_name(client: Any) -> str:
     return str(getattr(client, "model", getattr(client, "_model", client.__class__.__name__)))
+
+
+def _run_maybe_awaitable(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return run_autogen_sync(value)
+    return value
 
 
 __all__ = [

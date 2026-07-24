@@ -1,14 +1,11 @@
 experiment:
-  name: exp1_mmlu_crewai_role_based
-  output_root: experiments/exp1_mmlu_crewai
-  run_id: exp1_mmlu_crewai
-  seed: 42
+  name: exp3_tamas
+  output_root: experiments/exp3_tamas
+  run_id: exp3_tamas
 
 dataset:
-  name: modelscope/MMLU-Pro
-  path: src/mas_framework/mmlu/mmlu_pro_13x3_seed42.json
-  categories_per_sample: 13
-  samples_per_category: 3
+  name: tamas
+  path: src\mas_framework\tamas
 
 agents:
   default_model: qwen3.6-35b-a3b
@@ -21,9 +18,16 @@ agents:
   model_capability_coefficients:
     qwen3.6-35b-a3b: 8.52
     qwen3.6-plus: 8.85
+  
+collaboration:
+  allow_repeat_speaker: false
+  max_messages: 6
+  timeout_seconds: 300
+  request_timeout_seconds: 120
+  model_api_max_retries: 2
 
 group:
-  method: role_based_consensus
+  method: swarm_consensus
   n: 3
   f_value: 1
   model_regime: same

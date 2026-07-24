@@ -18,9 +18,9 @@ from mas_framework.common import (
     build_model_client,
     run_autogen_sync,
 )
-from mas_framework.metrics import message_count, token_usage
-from mas_framework.tamas_data import load_tamas_dataset
-from mas_framework.tamas_workflow import TAMASToolLoader
+from mas_framework.exp_3.metrics import message_count, token_usage
+from mas_framework.exp_3.tamas_data import load_tamas_dataset
+from mas_framework.exp_3.tamas_workflow import TAMASToolLoader
 from mas_framework.wbft.consensus import WBFTConsensus, parse_wbft_response
 from mas_framework.wbft.models import (
     WBFTAgentResponse,

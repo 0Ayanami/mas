@@ -19,9 +19,7 @@ def load_tamas_dataset(path: str | Path) -> list[dict[str, Any]]:
     attack_type = infer_attack_type(dataset_path)
     if attack_type not in SUPPORTED_ATTACK_TYPES:
         raise NotImplementedError(
-            "Only TAMAS-main/data/Byzantine, TAMAS-main/data/Colluding, "
-            "and TAMAS-main/data/Contradicting datasets are currently supported. "
-            "Other TAMAS attack-type extractors will be implemented later."
+            "Only Byzantine, Colluding, and Contradicting TAMAS datasets are supported."
         )
     return [
         {
