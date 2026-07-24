@@ -29,7 +29,6 @@ from mas_framework.exp_1.exp1_mmlu import (
     summarize_group_results,
 )
 from mas_framework.exp_1.models import (
-    Exp1AgentSpec,
     Exp1CaseResult,
     Exp1Config,
     Exp1GroupSpec,
@@ -57,9 +56,17 @@ CREWAI_WBFT_BYZANTINE_PROMPT = (
     "and set the JSON confidence field to 1.0."
 )
 
+CREWAI_WBFT_PROMPT =(
+    "\n\nInclude a WBFT confidence report:\n"
+    "Answer: <LETTER>\nConfidence: <0.00 to 1.00>\nReasoning: <brief>\n"
+    "WBFT_RESPONSE\n```json\n"
+    '{"answer": "A", "confidence": 0.0, "reasoning": "brief"}'
+    "\n```\nEND_WBFT_RESPONSE"
+)
+
 CREWAI_MEMORY_PROPOSAL_TRIGGER_PROMPT = (
     "\n\n# TASK-SCOPED MEMORY PROPOSAL TRIGGER\n"
-    "This role-based crew uses the same task-scoped consensus memory mechanism as the AutoGen runner. "
+    "This role-based crew uses task-scoped consensus memory mechanism. "
     "After each role task, decide whether your latest work produced information that should be verified "
     "and shared with later role tasks.\n"
     "Send a memory proposal trigger when at least one of the following is true:\n"
@@ -70,9 +77,8 @@ CREWAI_MEMORY_PROPOSAL_TRIGGER_PROMPT = (
     "If a trigger is needed, your entire response must end with this block:\n"
     "MEMORY_PROPOSAL_REQUEST\n"
     "reason: <one short sentence explaining what should be validated and shared>\n"
-    "candidate_memory: <one concise sentence containing the proposed reusable task fact or decision>\n"
     "END_MEMORY_PROPOSAL_REQUEST\n"
-    "Do not include ANSWER:(X), REVISED ANSWER:(X), or WBFT_RESPONSE inside the trigger block. "
+    "Do not include ANSWER:(X), REVISED ANSWER:(X) inside the trigger block. "
     "The coordinator will pause CrewAI, ask you to build a JSON proposal, verify it with other roles, "
     "then inject accepted task memory into later role tasks."
 )
@@ -81,10 +87,9 @@ MANAGER_PROMPT = (
     "You are the Central Coordinator of a multi-agent team solving multiple-choice questions "
     "(10 options, A through J, exactly one correct). "
     "You do NOT solve questions from scratch. "
-    "Your jobs are: aggregate role outputs, use accepted task-scoped memory when present, "
-    "resolve conflicts, and make the final decision. "
-    "Do not provide long reasoning or chain-of-thought. "
-    "Use only one option letter from A to J. "
+    "In the final round, aggregate the role outputs and make the final answer to the question. "
+    "Never introduce new domain reasoning; judge the supplied evidence, critiques, revisions, and accepted shared memory only. "
+    "Use exactly one option letter from A to J. "
     "Output exactly: ANSWER:(X)"
 )
 
@@ -141,43 +146,24 @@ def _role_prompt(role_name: str) -> str:
     raise ValueError(f"Unknown CrewAI role: {role_name}")
 
 
-def _collaboration_protocol(total_agents: int) -> str:
-    if total_agents == 3:
-        role_scheme = "N=3: 1 SOLVER, 1 CRITIC, 1 MANAGER."
-    elif total_agents == 5:
-        role_scheme = "N=5: 1 ANALYST, 2 SOLVERs, 1 CRITIC, 1 MANAGER."
-    elif total_agents == 7:
-        role_scheme = "N=7: 1 ANALYST, 3 SOLVERs, 2 CRITICs, 1 MANAGER."
-    else:
-        _role_plan_for_total_agents(total_agents)
-        role_scheme = ""
-    return (
-        f"Role scheme: {role_scheme}\n"
-        "Collaboration protocol:\n"
-        "Round 0: ANALYST frames the problem. This round is skipped for N=3; "
-        "the SOLVER self-frames in Round 1 instead.\n"
-        "Round 1: SOLVER(s) answer independently.\n"
-        "Round 2: CRITIC(s) challenge and sweep options.\n"
-        "Round 3: SOLVER(s) provide REVISED ANSWERs.\n"
-        "Final: MANAGER aggregates the role outputs and decides the final answer."
-    )
-
-
 @dataclass(frozen=True)
 class CrewAIEvent:
     source: str
     content: str
     usage: Any | None = None
     event_type: str = "role_output"
+    task_name: str | None = None
 
 
 @dataclass(frozen=True)
 class CrewAIRoleAssignment:
     agent_id: str
+    display_name: str
     role_name: str
     role_index: int
     is_byzantine: bool
     model: str
+    capability_coefficient: float
     agent: Any
 
 
@@ -196,7 +182,6 @@ class CrewAIMMLURunner:
         config: Exp1Config,
     ) -> None:
         self.config = config
-        self._agent_specs: dict[str, Exp1AgentSpec] = {}
         self._role_agents: list[CrewAIRoleAssignment] = []
         self._assignments: dict[str, CrewAIRoleAssignment] = {}
         self._manager: Any | None = None
@@ -231,7 +216,7 @@ class CrewAIMMLURunner:
         finally:
             pool.accepted_proposals.clear()
 
-        role_agent_ids = set(self._agent_specs)
+        role_agent_ids = set(self._assignments)
         predicted_answer = parse_final_answer(final_text)
         wbft_payload: dict[str, Any] | None = None
         consensus_extra_seconds = 0.0
@@ -291,10 +276,7 @@ class CrewAIMMLURunner:
             memory_proposals=memory_proposals,
             shared_task_memory=shared_task_memory,
             wbft_result=wbft_payload,
-            agent_specs={
-                agent_id: spec.to_dict()
-                for agent_id, spec in sorted(self._agent_specs.items())
-            },
+            agent_specs=self._role_agent_specs_payload(),
             metrics=case_metrics,
         )
         if self._group.uses_consensus:
@@ -331,10 +313,7 @@ class CrewAIMMLURunner:
                 {
                     "event": "group_started",
                     "group": self._group.to_dict(),
-                    "agent_specs": {
-                        agent_id: spec.to_dict()
-                        for agent_id, spec in sorted(self._agent_specs.items())
-                    },
+                    "agent_specs": self._role_agent_specs_payload(),
                     "weight_manager": self._weight_manager_parameters(),
                     "initial_weight_snapshots": self._weight_snapshots(),
                 }
@@ -347,11 +326,22 @@ class CrewAIMMLURunner:
     def consensus_process_log_path(self) -> Path | None:
         return self._process_log_path
 
+    def _role_agent_specs_payload(self) -> dict[str, dict[str, Any]]:
+        return {
+            assignment.agent_id: {
+                "agent_id": assignment.agent_id,
+                "display_name": assignment.display_name,
+                "model": assignment.model,
+                "is_byzantine": assignment.is_byzantine,
+                "capability_coefficient": assignment.capability_coefficient,
+            }
+            for assignment in sorted(self._role_agents, key=lambda item: item.agent_id)
+        }
+
     def _build_agents(self) -> tuple[list[CrewAIRoleAssignment], Any]:
         _prepare_crewai_runtime()
         from crewai import Agent
 
-        self._agent_specs = {}
         role_agents: list[CrewAIRoleAssignment] = []
         role_plan = _role_plan_for_total_agents(self._group.n)
         agent_types = assign_agent_types(self._group.n, self._group.f)
@@ -364,13 +354,6 @@ class CrewAIMMLURunner:
             agent_id = f"{role_name.lower()}_{role_index}"
             display_name = f"{role_name} {role_index}"
             capability = self.config.capability_coefficients.get(model, 1.0)
-            self._agent_specs[agent_id] = Exp1AgentSpec(
-                agent_id=agent_id,
-                display_name=display_name,
-                model=model,
-                is_byzantine=is_byzantine,
-                capability_coefficient=capability,
-            )
             if self.weight_manager is not None:
                 self.weight_manager.update_capability(agent_id, capability)
             crew_agent = Agent(
@@ -380,7 +363,6 @@ class CrewAIMMLURunner:
                     role_name=role_name,
                     role_index=role_index,
                     is_byzantine=is_byzantine,
-                    group=self._group,
                 ),
                 llm=_build_crewai_llm(model, self.config.temperature),
                 verbose=False,
@@ -392,10 +374,12 @@ class CrewAIMMLURunner:
             role_agents.append(
                 CrewAIRoleAssignment(
                     agent_id=agent_id,
+                    display_name=display_name,
                     role_name=role_name,
                     role_index=role_index,
                     is_byzantine=is_byzantine,
                     model=model,
+                    capability_coefficient=capability,
                     agent=crew_agent,
                 )
             )
@@ -428,47 +412,55 @@ class CrewAIMMLURunner:
         list[dict[str, Any]],
     ]:
         task_text = format_qa_task(question.question, question.options)
-        protocol = _collaboration_protocol(self._group.n)
         events: list[CrewAIEvent] = []
         decisions: list[dict[str, Any]] = []
         proposals: list[dict[str, Any]] = []
         usage_items: list[Any] = []
 
-        for step in self._role_steps(task_text=task_text, protocol=protocol):
-            description = self._description_with_context(
-                base_description=step["description"],
-                prior_events=events,
-                pool=pool,
-            )
-            content, usage = self._run_single_crewai_task(
-                agent=step["assignment"].agent,
-                description=description,
-                expected_output=step["expected_output"],
-                name=step["name"],
-            )
-            usage_items.append(usage)
-            event = CrewAIEvent(
-                source=step["assignment"].agent_id,
-                content=content,
-                usage=usage,
-            )
-            events.append(event)
-            self._handle_memory_trigger(
-                question=question,
-                task_text=task_text,
-                event=event,
-                pool=pool,
-                decisions=decisions,
-                proposals=proposals,
-                events=events,
-            )
+        for _round_name, round_steps in self._role_rounds(
+            task_text=task_text,
+        ):
+            # Freeze direct role-output visibility for this round. Thus, the
+            # independent solvers in Round 1 cannot read one another's raw
+            # answers. Accepted consensus memory remains live and is injected
+            # into each later task through ``pool``.
+            round_context = list(events)
+            for step in round_steps:
+                description = self._description_with_context(
+                    base_description=step["description"],
+                    prior_events=round_context,
+                    pool=pool,
+                )
+                content, usage = self._run_single_crewai_task(
+                    agent=step["assignment"].agent,
+                    description=description,
+                    expected_output=step["expected_output"],
+                    name=step["name"],
+                )
+                usage_items.append(usage)
+                event = CrewAIEvent(
+                    source=step["assignment"].agent_id,
+                    content=content,
+                    usage=usage,
+                    task_name=step["name"],
+                )
+                events.append(event)
+                self._handle_memory_trigger(
+                    question=question,
+                    task_text=task_text,
+                    event=event,
+                    pool=pool,
+                    decisions=decisions,
+                    proposals=proposals,
+                    events=events,
+                )
 
         assert self._manager is not None
         manager_description = self._description_with_context(
             base_description=(
-                f"{protocol}\n\nFinal: Aggregate all role outputs and decide the final "
-                "answer for the original MMLU-Pro task. Do not solve from scratch; use "
-                "the team evidence, accepted task-scoped memory, and resolve conflicts. "
+                "Final: Aggregate all role outputs and decide the final answer for the original MMLU-Pro task. "
+                "Do not solve from scratch;"
+                "use the team evidence, accepted task-scoped memory, and resolve conflicts. "
                 "Output exactly one line in the format ANSWER:(<LETTER>).\n\n"
                 f"{task_text}"
             ),
@@ -498,72 +490,87 @@ class CrewAIMMLURunner:
             pool.payloads(),
         )
 
-    def _role_steps(self, *, task_text: str, protocol: str) -> list[dict[str, Any]]:
+    def _role_rounds(
+        self,
+        *,
+        task_text: str,
+    ) -> list[tuple[str, list[dict[str, Any]]]]:
         analysts = [item for item in self._role_agents if item.role_name == "ANALYST"]
         solvers = [item for item in self._role_agents if item.role_name == "SOLVER"]
         critics = [item for item in self._role_agents if item.role_name == "CRITIC"]
-        steps: list[dict[str, Any]] = []
+        analyst_steps: list[dict[str, Any]] = []
         for analyst in analysts:
-            steps.append(
+            analyst_steps.append(
                 {
                     "assignment": analyst,
-                    "description": (
-                        f"{protocol}\n\nRound 0: Frame the problem for the team.\n\n"
-                        f"{task_text}"
+                    "description": self._consensus_task_description(
+                        task_text,
+                        round_instruction="Round 0: Frame the problem for the team.\n\n",
                     ),
                     "expected_output": "KEY KNOWLEDGE: <1-3 concise facts>",
                     "name": f"{analyst.agent_id}_round0_analysis",
                 }
             )
+        solver_steps: list[dict[str, Any]] = []
         for solver in solvers:
-            steps.append(
+            solver_steps.append(
                 {
                     "assignment": solver,
-                    "description": self._agent_task_description(
+                    "description": self._consensus_task_description(
                         task_text,
                         round_instruction=(
                             "Round 1: Answer independently. If there is no ANALYST, "
                             "briefly self-frame the domain and key concepts before answering."
                         ),
-                        protocol=protocol,
                     ),
                     "expected_output": "REASONING: <brief>\nANSWER:(<LETTER>)",
                     "name": f"{solver.agent_id}_round1_answer",
                 }
             )
+        critic_steps: list[dict[str, Any]] = []
         for critic in critics:
-            steps.append(
+            critic_steps.append(
                 {
                     "assignment": critic,
-                    "description": self._agent_task_description(
+                    "description": self._consensus_task_description(
                         task_text,
                         round_instruction=(
                             "Round 2: Challenge the reasoning and sweep options A through J. "
                             "Identify weak assumptions, factual errors, and strongest alternatives."
                         ),
-                        protocol=protocol,
                     ),
                     "expected_output": "CRITIQUE: <concise challenge and option sweep>",
                     "name": f"{critic.agent_id}_round2_critique",
                 }
             )
+        revision_steps: list[dict[str, Any]] = []
         for solver in solvers:
-            steps.append(
+            description = self._consensus_task_description(
+                task_text,
+                round_instruction=(
+                    "Round 3: Review the analyst and critic outputs, then provide "
+                    "a revised answer. Keep the revision concise."
+                ),
+            )
+            revision_steps.append(
                 {
                     "assignment": solver,
-                    "description": self._agent_task_description(
-                        task_text,
-                        round_instruction=(
-                            "Round 3: Review the analyst and critic outputs, then provide "
-                            "a revised answer. Keep the revision concise."
-                        ),
-                        protocol=protocol,
-                    ),
+                    "description": self._wbft_task_description(description, solver.agent_id),
                     "expected_output": "REVISION: <brief>\nREVISED ANSWER:(<LETTER>)",
                     "name": f"{solver.agent_id}_round3_revision",
                 }
             )
-        return steps
+        rounds: list[tuple[str, list[dict[str, Any]]]] = []
+        if analyst_steps:
+            rounds.append(("round0_analysis", analyst_steps))
+        rounds.extend(
+            [
+                ("round1_independent_answers", solver_steps),
+                ("round2_critique", critic_steps),
+                ("round3_revisions", revision_steps),
+            ]
+        )
+        return rounds
 
     def _run_single_crewai_task(
         self,
@@ -630,7 +637,7 @@ class CrewAIMMLURunner:
     ) -> None:
         if self._group is None or not self._group.uses_consensus:
             return
-        if event.source not in self._agent_specs:
+        if event.source not in self._assignments:
             return
         if "END_MEMORY_PROPOSAL_REQUEST" not in event.content:
             return
@@ -769,7 +776,7 @@ class CrewAIMMLURunner:
         )
         include_proposer = bool(verification_cfg.get("include_proposer_as_verifier", False))
         verifications = []
-        for agent_id in self._agent_specs:
+        for agent_id in self._assignments:
             if not include_proposer and agent_id == source:
                 continue
             verifications.append(evaluator.evaluate(proposal, context, verifier_agent_id=agent_id))
@@ -786,26 +793,28 @@ class CrewAIMMLURunner:
             proposal if decision.accepted else None,
         )
 
-    def _agent_task_description(
+    def _consensus_task_description(
         self,
         task_text: str,
         *,
         round_instruction: str,
-        protocol: str,
     ) -> str:
-        text = f"{protocol}\n\n{round_instruction}\n\n{task_text}"
+        """只判断共识机制"""
+        text = f"{round_instruction}\n\n{task_text}"
         assert self._group is not None
-        if self._group.uses_wbft:
-            text += (
-                "\n\nInclude a WBFT confidence report:\n"
-                "Answer: <LETTER>\nConfidence: <0.00 to 1.00>\nReasoning: <brief>\n"
-                "WBFT_RESPONSE\n```json\n"
-                '{"answer": "A", "confidence": 0.0, "reasoning": "brief"}'
-                "\n```\nEND_WBFT_RESPONSE"
-            )
         if self._group.uses_consensus:
             text += CREWAI_MEMORY_PROPOSAL_TRIGGER_PROMPT
         return text
+
+    def _wbft_task_description(self, description: str, agent_id: str) -> str:
+        """只判断wbft机制"""
+        if self._group.uses_wbft:
+            description += CREWAI_WBFT_PROMPT
+            if self._assignments[agent_id].is_byzantine:
+                description += CREWAI_WBFT_BYZANTINE_PROMPT
+            else:
+                return description
+        return description
 
     def _description_with_context(
         self,
@@ -815,13 +824,19 @@ class CrewAIMMLURunner:
         pool: TaskMemoryPool,
     ) -> str:
         parts = [base_description]
-        if prior_events:
+        visible_role_events = [
+            event
+            for event in prior_events
+            if event.event_type == "role_output"
+            and event.source != "memory_coordinator"
+            and event.content
+        ]
+        if visible_role_events:
             parts.append(
                 "Prior role outputs in this task:\n"
                 + "\n\n".join(
                     f"{event.source}: {event.content}"
-                    for event in prior_events
-                    if event.source != "memory_coordinator" and event.content
+                    for event in visible_role_events
                 )
             )
         if pool.accepted_proposals:
@@ -834,14 +849,11 @@ class CrewAIMMLURunner:
         role_name: str,
         role_index: int,
         is_byzantine: bool,
-        group: Exp1GroupSpec,
     ) -> str:
         text = (
             f"You are {role_name} {role_index} in a role-based MMLU QA team.\n"
             f"{_role_prompt(role_name)}"
         )
-        if group.uses_wbft and is_byzantine:
-            text += " " + CREWAI_WBFT_BYZANTINE_PROMPT
         if is_byzantine:
             text += "\n\n" + CREWAI_BYZANTINE_PROMPT
         return text
@@ -850,7 +862,13 @@ class CrewAIMMLURunner:
         responses_by_agent: dict[str, WBFTAgentResponse] = {}
         wbft_cfg = self.config.wbft
         for event in events:
-            if event.source not in self._agent_specs:
+            if event.source not in self._assignments:
+                continue
+            if self._assignments[event.source].role_name != "SOLVER":
+                continue
+            if not event.task_name or not event.task_name.endswith("_round3_revision"):
+                continue
+            if "END_WBFT_RESPONSE" not in event.content:
                 continue
             response = parse_wbft_response(
                 event.source,
@@ -863,7 +881,7 @@ class CrewAIMMLURunner:
                 responses_by_agent[event.source] = response
         responses = [
             responses_by_agent[agent_id]
-            for agent_id in self._agent_specs
+            for agent_id in self._assignments
             if agent_id in responses_by_agent
         ]
         consensus = WBFTConsensus(
@@ -885,13 +903,13 @@ class CrewAIMMLURunner:
             )
         agent_weights = {
             agent_id: self.weight_manager.weight(agent_id)
-            for agent_id in self._agent_specs
+            for agent_id in self._assignments
         }
         honest_agents = [
-            agent_id for agent_id, spec in self._agent_specs.items() if not spec.is_byzantine
+            agent_id for agent_id, assignment in self._assignments.items() if not assignment.is_byzantine
         ]
         byzantine_agents = [
-            agent_id for agent_id, spec in self._agent_specs.items() if spec.is_byzantine
+            agent_id for agent_id, assignment in self._assignments.items() if assignment.is_byzantine
         ]
         return SmartQuorumConsensus(
             agent_weights=agent_weights,
@@ -933,7 +951,7 @@ class CrewAIMMLURunner:
             return {}
         return {
             agent_id: self.weight_manager.snapshot(agent_id)
-            for agent_id in sorted(self._agent_specs)
+            for agent_id in sorted(self._assignments)
         }
 
     def _weight_manager_parameters(self) -> dict[str, Any]:
