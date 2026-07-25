@@ -131,9 +131,7 @@ class WBFTConsensus:
             total_nodes=total_nodes,
             max_faulty=max_faulty_nodes,
         )
-        convergence_achieved = confidence_weight_ratio >= (
-            0.5 + self.convergence_threshold
-        )
+        convergence_achieved = consensus_confidence >= self.convergence_threshold
 
         return WBFTConsensusResult(
             consensus_answer=answer_by_normalized.get(winning_answer, winning_answer),

@@ -72,5 +72,5 @@ wbft:
   fault_tolerance_threshold: 0.33
   minimum_participants: 1
   normalization: auto
-  include_unstructured_outputs: true
+  include_unstructured_outputs: false
   fallback_confidence: 0.0

@@ -228,7 +228,9 @@ class CrewAIMMLURunner:
             consensus_extra_seconds = time.perf_counter() - wbft_started
             consensus_extra_messages = len(wbft_responses)
             wbft_payload = wbft_result.to_dict()
-            predicted_answer = parse_final_answer(wbft_result.consensus_answer)
+            wbft_answer = parse_final_answer(wbft_result.consensus_answer)
+            if wbft_result.participant_count > 0 and wbft_answer is not None:
+                predicted_answer = wbft_answer
         elif self._group.uses_consensus:
             consensus_extra_seconds = sum(
                 float(item.get("_experiment", {}).get("consensus_seconds", 0.0))
@@ -874,7 +876,7 @@ class CrewAIMMLURunner:
                 event.source,
                 event.content,
                 confidence_extraction_method=wbft_cfg.get("confidence_extraction_method", "regex"),
-                include_unstructured=bool(wbft_cfg.get("include_unstructured_outputs", True)),
+                include_unstructured=bool(wbft_cfg.get("include_unstructured_outputs", False)),
                 fallback_confidence=float(wbft_cfg.get("fallback_confidence", 0.0)),
             )
             if response is not None:
