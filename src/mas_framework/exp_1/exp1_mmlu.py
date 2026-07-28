@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import inspect
 from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
@@ -609,14 +610,14 @@ class Exp1Runner:
         save_state = getattr(proposer_agent, "save_state", None)
         load_state = getattr(proposer_agent, "load_state", None)
         if callable(save_state) and callable(load_state):
-            proposer_state = deepcopy(save_state())
+            proposer_state = deepcopy(await _maybe_await(save_state()))
         try:
             result = await proposer_agent.run(task=prompt)
         except Exception:
             return None
         finally:
             if proposer_state is not None:
-                load_state(proposer_state)
+                await _maybe_await(load_state(proposer_state))
         content = _agent_task_result_text(result)
         return _extract_memory_proposal_payload(content) or _extract_json_object(content)
 
@@ -879,6 +880,12 @@ def _agent_message_count(events: list[Any], agent_ids: set[str]) -> int:
         and getattr(event, "source", None) in agent_ids
         and isinstance(getattr(event, "content", None), str)
     )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _final_agent_text(events: list[Any], agent_ids: set[str]) -> str:

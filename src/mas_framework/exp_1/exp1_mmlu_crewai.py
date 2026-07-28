@@ -366,7 +366,11 @@ class CrewAIMMLURunner:
                     role_index=role_index,
                     is_byzantine=is_byzantine,
                 ),
-                llm=_build_crewai_llm(model, self.config.temperature),
+                llm=_build_crewai_llm(
+                    model,
+                    self.config.temperature,
+                    timeout=self.config.request_timeout_seconds,
+                ),
                 verbose=False,
                 allow_delegation=False,
                 max_iter=1,
@@ -391,7 +395,11 @@ class CrewAIMMLURunner:
             role="MANAGER",
             goal="Aggregate role-based QA agent outputs and provide the final answer.",
             backstory=MANAGER_PROMPT,
-            llm=_build_crewai_llm(manager_model, self.config.temperature),
+            llm=_build_crewai_llm(
+                manager_model,
+                self.config.temperature,
+                timeout=self.config.request_timeout_seconds,
+            ),
             verbose=False,
             allow_delegation=False,
             max_iter=1,
@@ -1028,7 +1036,12 @@ def _prepare_crewai_runtime() -> None:
     appdirs.user_data_dir = lambda appname=None, appauthor=None, **kwargs: str(storage)
 
 
-def _build_crewai_llm(model: str, temperature: float | None) -> Any:
+def _build_crewai_llm(
+    model: str,
+    temperature: float | None,
+    *,
+    timeout: float | None = None,
+) -> Any:
     _prepare_crewai_runtime()
     from crewai import LLM
 
@@ -1043,6 +1056,8 @@ def _build_crewai_llm(model: str, temperature: float | None) -> Any:
         "provider": "openai",
         "temperature": temperature,
     }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     if base_url:
         kwargs["base_url"] = base_url
     return LLM(**kwargs)

@@ -3,7 +3,6 @@
 /data
 /theory_base
 tests
-examples
 .env
 __pycache__/
 src/mas_framework/consensus/__pycache__/

@@ -48,9 +48,9 @@ proposal:
     type: llm
     include_proposer_as_verifier: false
     dimension_weights:
-      veracity: 0.35
-      rationality: 0.20
-      value: 0.20
+      veracity: 0.25
+      rationality: 0.25
+      value: 0.25
       security: 0.25
   consensus:
     strategy: smart_quorum
